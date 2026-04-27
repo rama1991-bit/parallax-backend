@@ -1,3 +1,6 @@
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -32,4 +35,42 @@ async def root():
         "name": "Parallax",
         "status": "running",
         "message": "Narrative intelligence backend is alive.",
+    }
+@app.get("/api/feed")
+def get_feed():
+    database_url = os.getenv("DATABASE_URL")
+
+    conn = psycopg2.connect(database_url)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        select
+            id,
+            title,
+            summary,
+            source,
+            url,
+            topic,
+            card_type,
+            priority,
+            narrative_signal,
+            evidence_score,
+            framing,
+            is_read,
+            is_saved,
+            is_dismissed,
+            created_at
+        from feed_cards
+        where is_dismissed = false
+        order by priority desc, created_at desc
+        limit 20;
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return {
+        "items": rows,
+        "next_cursor": None
     }
