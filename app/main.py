@@ -13,6 +13,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
+from fastapi import Request
+from fastapi.responses import Response
+
+@app.middleware("http")
+async def force_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response()
+    else:
+        response = await call_next(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "https://parallax-frontend.vercel.app"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
