@@ -91,3 +91,21 @@ def debug_env():
 @app.get("/feed")
 def get_feed_alias():
     return get_feed()
+
+@app.post("/analyze")
+def analyze_article():
+    return {
+        "title": "Analyzed article",
+        "summary": "This article contains extracted claims and narrative signals.",
+        "source": "External",
+        "url": "input-url",
+        "topic": "Analysis",
+        "card_type": "article_insight",
+        "priority": 0.8,
+        "narrative_signal": "Narrative signal only — not a truth verdict.",
+        "evidence_score": 0.6,
+        "framing": "Institutional response",
+        "is_read": False,
+        "is_saved": False,
+        "is_dismissed": False
+    }
