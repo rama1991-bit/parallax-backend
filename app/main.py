@@ -151,3 +151,7 @@ def analyze_article_api(payload: AnalyzeRequest):
 @app.post("/api/v1/analyze")
 def analyze_article_v1(payload: AnalyzeRequest):
     return mock_analyze_response(payload.url)
+
+@app.options("/api/v1/analyze")
+def analyze_options():
+    return {}
