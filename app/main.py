@@ -154,6 +154,17 @@ def mock_analyze_response(url: str | None = None):
     }
 
 
+from fastapi.responses import Response
+
+@app.options("/api/v1/analyze")
+def analyze_preflight():
+    response = Response(status_code=204)
+    response.headers["Access-Control-Allow-Origin"] = "https://parallax-frontend.vercel.app"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 @app.post("/analyze")
 def analyze_article(payload: AnalyzeRequest):
     return mock_analyze_response(payload.url)
@@ -171,3 +182,4 @@ def analyze_article_v1(payload: AnalyzeRequest):
 @app.options("/api/v1/analyze")
 def analyze_options():
     return {}
+
