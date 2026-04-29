@@ -109,3 +109,42 @@ def analyze_article():
         "is_saved": False,
         "is_dismissed": False
     }
+
+from pydantic import BaseModel
+
+class AnalyzeRequest(BaseModel):
+    url: str | None = None
+
+
+def mock_analyze_response(url: str | None = None):
+    return {
+        "id": "mock-analyze-card",
+        "title": "New article insight",
+        "summary": "This article contains extracted claims, with a dominant frame of institutional_response.",
+        "source": "example.com",
+        "url": url or "https://example.com",
+        "topic": "Analysis",
+        "card_type": "article_insight",
+        "priority": 0.8,
+        "narrative_signal": "Narrative signal only — not a truth verdict.",
+        "evidence_score": 0.6,
+        "framing": "institutional_response",
+        "is_read": False,
+        "is_saved": False,
+        "is_dismissed": False,
+    }
+
+
+@app.post("/analyze")
+def analyze_article(payload: AnalyzeRequest):
+    return mock_analyze_response(payload.url)
+
+
+@app.post("/api/analyze")
+def analyze_article_api(payload: AnalyzeRequest):
+    return mock_analyze_response(payload.url)
+
+
+@app.post("/api/v1/analyze")
+def analyze_article_v1(payload: AnalyzeRequest):
+    return mock_analyze_response(payload.url)
