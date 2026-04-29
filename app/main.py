@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -10,6 +11,14 @@ from app.api.v1.api import api_router
 app = FastAPI(
     title="Parallax Narrative Intelligence",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 origins = [
