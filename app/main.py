@@ -87,3 +87,7 @@ def get_feed():
 @app.get("/debug/env")
 def debug_env():
     return {"database_url_exists": bool(os.getenv("DATABASE_URL"))}
+
+@app.get("/feed")
+def get_feed_alias():
+    return get_feed()
