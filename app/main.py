@@ -73,4 +73,6 @@ def get_feed():
     return {
         "items": rows,
         "next_cursor": None
-    }
+    }@app.get("/debug/env")
+def debug_env():
+    return {"database_url_exists": bool(os.getenv("DATABASE_URL"))}
