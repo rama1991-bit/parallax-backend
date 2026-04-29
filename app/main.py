@@ -1,60 +1,61 @@
-from fastapi.middleware.cors import CORSMiddleware
 import os
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.api.v1.api import api_router
+
 
 app = FastAPI(
     title="Parallax Narrative Intelligence",
     version="0.1.0",
 )
 
-from fastapi import Request
-from fastapi.responses import Response
-
-@app.middleware("http")
-async def force_cors_headers(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response()
-    else:
-        response = await call_next(request)
-
-    response.headers["Access-Control-Allow-Origin"] = "https://parallax-frontend.vercel.app"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-
-    return response
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://parallax-frontend.vercel.app",
-        "http://localhost:3000",
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-origins = [
-    settings.FRONTEND_URL,
+allowed_origins = [
+    "https://parallax-frontend.vercel.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
 
+if getattr(settings, "FRONTEND_URL", None):
+    allowed_origins.append(settings.FRONTEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins + ["*"] if settings.ENV == "development" else origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=list(set(allowed_origins)),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+class AnalyzeRequest(BaseModel):
+    url: str | None = None
+
+
+def mock_analyze_response(url: str | None = None):
+    return {
+        "id": "mock-analyze-card",
+        "title": "New article insight",
+        "summary": "This article contains extracted claims, with a dominant frame of institutional_response.",
+        "source": "External",
+        "url": url or "https://example.com",
+        "topic": "Analysis",
+        "card_type": "article_insight",
+        "priority": 0.8,
+        "narrative_signal": "Narrative signal only — not a truth verdict.",
+        "evidence_score": 0.6,
+        "framing": "institutional_response",
+        "is_read": False,
+        "is_saved": False,
+        "is_dismissed": False,
+    }
 
 
 @app.get("/")
@@ -64,9 +65,19 @@ async def root():
         "status": "running",
         "message": "Narrative intelligence backend is alive.",
     }
+
+
+@app.get("/debug/env")
+def debug_env():
+    return {"database_url_exists": bool(os.getenv("DATABASE_URL"))}
+
+
 @app.get("/api/feed")
 def get_feed():
     database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"items": [], "next_cursor": None, "error": "DATABASE_URL is missing"}
 
     conn = psycopg2.connect(database_url)
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -100,69 +111,18 @@ def get_feed():
 
     return {
         "items": rows,
-        "next_cursor": None
+        "next_cursor": None,
     }
 
-@app.get("/debug/env")
-def debug_env():
-    return {"database_url_exists": bool(os.getenv("DATABASE_URL"))}
 
 @app.get("/feed")
 def get_feed_alias():
     return get_feed()
 
-@app.post("/analyze")
-def analyze_article():
-    return {
-        "title": "Analyzed article",
-        "summary": "This article contains extracted claims and narrative signals.",
-        "source": "External",
-        "url": "input-url",
-        "topic": "Analysis",
-        "card_type": "article_insight",
-        "priority": 0.8,
-        "narrative_signal": "Narrative signal only — not a truth verdict.",
-        "evidence_score": 0.6,
-        "framing": "Institutional response",
-        "is_read": False,
-        "is_saved": False,
-        "is_dismissed": False
-    }
 
-from pydantic import BaseModel
-
-class AnalyzeRequest(BaseModel):
-    url: str | None = None
-
-
-def mock_analyze_response(url: str | None = None):
-    return {
-        "id": "mock-analyze-card",
-        "title": "New article insight",
-        "summary": "This article contains extracted claims, with a dominant frame of institutional_response.",
-        "source": "example.com",
-        "url": url or "https://example.com",
-        "topic": "Analysis",
-        "card_type": "article_insight",
-        "priority": 0.8,
-        "narrative_signal": "Narrative signal only — not a truth verdict.",
-        "evidence_score": 0.6,
-        "framing": "institutional_response",
-        "is_read": False,
-        "is_saved": False,
-        "is_dismissed": False,
-    }
-
-
-from fastapi.responses import Response
-
-@app.options("/api/v1/analyze")
-def analyze_preflight():
-    response = Response(status_code=204)
-    response.headers["Access-Control-Allow-Origin"] = "https://parallax-frontend.vercel.app"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+@app.get("/api/v1/feed")
+def get_feed_v1():
+    return get_feed()
 
 
 @app.post("/analyze")
@@ -178,8 +138,3 @@ def analyze_article_api(payload: AnalyzeRequest):
 @app.post("/api/v1/analyze")
 def analyze_article_v1(payload: AnalyzeRequest):
     return mock_analyze_response(payload.url)
-
-@app.options("/api/v1/analyze")
-def analyze_options():
-    return {}
-
