@@ -60,7 +60,7 @@ def get_feed():
             is_saved,
             is_dismissed,
             created_at
-        from feed_cards
+        from public.feed_cards
         where is_dismissed = false
         order by priority desc, created_at desc
         limit 20;
