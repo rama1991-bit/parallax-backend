@@ -35,6 +35,8 @@ SOURCES = []
 SOURCE_FEEDS = []
 INGESTED_ARTICLES = []
 ARTICLE_COMPARISONS = []
+NODES = []
+NODE_EDGES = []
 
 _SCHEMA_READY = False
 _HIGH_PRIORITY_ALERT_THRESHOLD = 0.75
@@ -2341,6 +2343,662 @@ def get_feed_card_for_ingested_article(
         raise FeedStoreError(f"Could not load ingested article feed card: {exc}") from exc
 
 
+def _safe_text_list(value, limit: int = 20) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    cleaned = []
+    seen = set()
+    for item in value:
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("claim") or item.get("label") or item.get("name")
+        else:
+            text = item
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        key = text.lower()
+        if text and key not in seen:
+            cleaned.append(text)
+            seen.add(key)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _compact_text(value: object, fallback: str = "", limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip() or fallback
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _node_slug(node_type: str, label: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (label or "").lower()).strip("-")
+    return f"{node_type}-{slug[:72]}" if slug else f"{node_type}-{uuid4().hex[:12]}"
+
+
+def _node_perspective(
+    title: str,
+    question: str,
+    summary: str,
+    signals: list[str] | None = None,
+    limitations: list[str] | None = None,
+    actions: list[dict] | None = None,
+) -> dict:
+    return {
+        "title": title,
+        "question": question,
+        "summary": summary,
+        "signals": _safe_text_list(signals or [], limit=8),
+        "limitations": _safe_text_list(limitations or [], limit=8),
+        "actions": actions or [],
+    }
+
+
+def _node_record(
+    node_type: str,
+    label: str,
+    article: dict,
+    session_id: str,
+    node_metadata: dict,
+    claim_text: str | None = None,
+    source_id: str | None = None,
+) -> dict:
+    now = now_iso()
+    clean_label = _compact_text(label, fallback=node_type.title(), limit=240)
+    return {
+        "id": str(uuid4()),
+        "session_id": session_id,
+        "node_type": node_type,
+        "label": clean_label,
+        "slug": _node_slug(node_type, clean_label),
+        "source_id": source_id or article.get("source_id"),
+        "ingested_article_id": article.get("id"),
+        "topic_id": None,
+        "claim_text": claim_text,
+        "node_metadata": node_metadata,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _edge_record(
+    from_node_id: str,
+    to_node_id: str,
+    edge_type: str,
+    weight: float = 0.5,
+    evidence: list[dict] | None = None,
+    session_id: str = ANONYMOUS_SESSION_ID,
+) -> dict:
+    return {
+        "id": str(uuid4()),
+        "session_id": session_id,
+        "from_node_id": from_node_id,
+        "to_node_id": to_node_id,
+        "edge_type": edge_type,
+        "weight": round(max(0.0, min(_as_float(weight, 0.5), 1.0)), 3),
+        "evidence": evidence or [],
+        "created_at": now_iso(),
+    }
+
+
+def _row_to_node(row: dict) -> dict:
+    created_at = row.get("created_at")
+    updated_at = row.get("updated_at")
+    if isinstance(created_at, datetime):
+        created_at = created_at.isoformat()
+    if isinstance(updated_at, datetime):
+        updated_at = updated_at.isoformat()
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "node_type": row.get("node_type"),
+        "label": row.get("label"),
+        "slug": row.get("slug"),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "ingested_article_id": str(row.get("ingested_article_id")) if row.get("ingested_article_id") else None,
+        "topic_id": str(row.get("topic_id")) if row.get("topic_id") else None,
+        "claim_text": row.get("claim_text"),
+        "node_metadata": row.get("node_metadata") or {},
+        "created_at": created_at or now_iso(),
+        "updated_at": updated_at or created_at or now_iso(),
+    }
+
+
+def _row_to_node_edge(row: dict) -> dict:
+    created_at = row.get("created_at")
+    if isinstance(created_at, datetime):
+        created_at = created_at.isoformat()
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "from_node_id": str(row.get("from_node_id")),
+        "to_node_id": str(row.get("to_node_id")),
+        "edge_type": row.get("edge_type"),
+        "weight": _as_float(row.get("weight"), 0.5),
+        "evidence": row.get("evidence") or [],
+        "created_at": created_at or now_iso(),
+    }
+
+
+def _entity_nodes_from_intelligence(intelligence: dict) -> list[tuple[str, str]]:
+    entities = intelligence.get("entities") if isinstance(intelligence.get("entities"), dict) else {}
+    entity_nodes: list[tuple[str, str]] = []
+    for node_type, key in (
+        ("person", "people"),
+        ("organization", "organizations"),
+        ("location", "locations"),
+        ("event", "events"),
+    ):
+        for label in _safe_text_list(entities.get(key) or [], limit=4):
+            entity_nodes.append((node_type, label))
+    return entity_nodes[:10]
+
+
+def _build_article_node_records(article: dict, session_id: str) -> tuple[list[dict], list[dict]]:
+    analysis = _article_analysis_payload(article)
+    intelligence = analysis.get("intelligence") if isinstance(analysis.get("intelligence"), dict) else {}
+    source = article.get("source") if isinstance(article.get("source"), dict) else {}
+    narrative = intelligence.get("narrative") if isinstance(intelligence.get("narrative"), dict) else {}
+    source_analysis = (
+        intelligence.get("source_analysis") if isinstance(intelligence.get("source_analysis"), dict) else {}
+    )
+    comparison_hooks = (
+        intelligence.get("comparison_hooks") if isinstance(intelligence.get("comparison_hooks"), dict) else {}
+    )
+
+    claims = _safe_text_list(analysis.get("key_claims") or intelligence.get("key_claims") or [], limit=10)
+    topics = _safe_text_list(analysis.get("topics") or [], limit=8)
+    if not topics:
+        topics = _safe_text_list(article.get("comparison_keywords") or comparison_hooks.get("similarity_keywords") or [], limit=8)
+    frames = _safe_text_list(analysis.get("narrative_framing") or [], limit=8)
+    if narrative.get("main_frame"):
+        frames = _safe_text_list([narrative.get("main_frame"), *frames, *(narrative.get("secondary_frames") or [])], limit=8)
+    missing_context = _safe_text_list(narrative.get("missing_context") or [], limit=8)
+    title = article.get("title") or (intelligence.get("article") or {}).get("title") or article.get("url") or "Article"
+    summary = intelligence.get("summary") or analysis.get("summary") or article.get("summary") or ""
+    confidence = _as_float(analysis.get("confidence") or (intelligence.get("scores") or {}).get("confidence_score"), 0.5)
+    compare_href = f"/compare?articleId={article.get('id')}"
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    article_node = _node_record(
+        "article",
+        title,
+        article,
+        session_id,
+        {
+            "tab": "Summary",
+            "url": article.get("url"),
+            "published_at": article.get("published_at"),
+            "language": article.get("language") or source.get("language"),
+            "country": article.get("country") or source.get("country"),
+            "analysis_status": article.get("analysis_status") or "pending",
+            "summary": summary,
+            "key_claim_count": len(claims),
+            "confidence": round(confidence, 3),
+            "perspective": _node_perspective(
+                "Article node",
+                "Analyze this story as a standalone article.",
+                _compact_text(summary, fallback="No article summary has been saved yet.", limit=320),
+                signals=[
+                    f"{len(claims)} extracted claims",
+                    f"Main frame: {frames[0]}" if frames else "No dominant frame extracted",
+                    f"Confidence: {round(confidence, 2)}",
+                ],
+                limitations=[
+                    "This node summarizes extracted structure, not factual truth.",
+                    "Full context requires source, compare, and OSINT review.",
+                ],
+                actions=[
+                    {"type": "compare", "label": "Compare coverage", "href": compare_href},
+                    {"type": "open_source_article", "label": "Open source article", "href": article.get("url")},
+                ],
+            ),
+        },
+        source_id=article.get("source_id"),
+    )
+    nodes.append(article_node)
+
+    source_label = source.get("name") or article.get("source_id") or "Unknown source"
+    source_actions = []
+    if article.get("source_id"):
+        source_actions.append(
+            {
+                "type": "open_source_profile",
+                "label": "Open source profile",
+                "href": f"/sources/{article.get('source_id')}",
+            }
+        )
+    source_node = _node_record(
+        "source",
+        source_label,
+        article,
+        session_id,
+        {
+            "tab": "Source",
+            "source": source,
+            "source_analysis": source_analysis,
+            "perspective": _node_perspective(
+                "Source node",
+                "Analyze this story through the publishing source.",
+                source_analysis.get("source_profile")
+                or f"{source_label} is the publishing source for this ingested article.",
+                signals=[
+                    source.get("source_type") or "Source type unknown",
+                    source.get("source_size") or "Source size unknown",
+                    source.get("political_context") or source_analysis.get("known_angle") or "No political context saved",
+                ],
+                limitations=[
+                    source.get("credibility_notes") or "No credibility notes have been added for this source.",
+                    "Source metadata is contextual and should not be treated as a verdict.",
+                ],
+                actions=source_actions,
+            ),
+        },
+        source_id=article.get("source_id"),
+    )
+    nodes.append(source_node)
+    edges.append(
+        _edge_record(
+            article_node["id"],
+            source_node["id"],
+            "published_by",
+            weight=0.9,
+            evidence=[{"field": "source_id", "value": article.get("source_id")}],
+            session_id=session_id,
+        )
+    )
+
+    author = article.get("author") or (intelligence.get("article") or {}).get("author") or "Unknown author"
+    author_known = author != "Unknown author"
+    author_node = _node_record(
+        "author",
+        author,
+        article,
+        session_id,
+        {
+            "tab": "Author",
+            "known": author_known,
+            "perspective": _node_perspective(
+                "Author node",
+                "Analyze this story through the author/byline node.",
+                f"The byline is {author}." if author_known else "No author byline was extracted from this article.",
+                signals=[f"Author: {author}", f"Source: {source_label}"],
+                limitations=[
+                    "Author identity can be absent, syndicated, or different from editorial framing.",
+                    "Pattern analysis needs more articles by this author before drawing conclusions.",
+                ],
+            ),
+        },
+        source_id=article.get("source_id"),
+    )
+    nodes.append(author_node)
+    edges.append(
+        _edge_record(
+            article_node["id"],
+            author_node["id"],
+            "attributed_to",
+            weight=0.7 if author_known else 0.35,
+            evidence=[{"field": "author", "value": author if author_known else None}],
+            session_id=session_id,
+        )
+    )
+
+    event_label = (
+        article.get("event_fingerprint")
+        or (comparison_hooks.get("event_fingerprint") if isinstance(comparison_hooks, dict) else None)
+        or _compact_text(title, fallback="Article background", limit=90)
+    )
+    event_node = _node_record(
+        "event",
+        f"Background: {event_label}",
+        article,
+        session_id,
+        {
+            "tab": "Background",
+            "event_fingerprint": article.get("event_fingerprint") or comparison_hooks.get("event_fingerprint"),
+            "search_queries": comparison_hooks.get("search_queries") or [title],
+            "missing_context": missing_context,
+            "perspective": _node_perspective(
+                "Event/background node",
+                "Analyze the historical or event background around this story.",
+                "This node groups background hooks, missing context, and event fingerprint signals.",
+                signals=[
+                    f"Event fingerprint: {article.get('event_fingerprint') or 'not set'}",
+                    f"{len(missing_context)} missing-context notes",
+                ],
+                limitations=[
+                    "Background is extracted from the article analysis and is not independent OSINT.",
+                    "Step 7 will add bounded external OSINT references.",
+                ],
+            ),
+        },
+        source_id=article.get("source_id"),
+    )
+    nodes.append(event_node)
+    edges.append(
+        _edge_record(
+            article_node["id"],
+            event_node["id"],
+            "contextualized_by",
+            weight=0.75,
+            evidence=[{"field": "event_fingerprint", "value": article.get("event_fingerprint")}],
+            session_id=session_id,
+        )
+    )
+
+    topic_nodes = []
+    for topic in topics[:6]:
+        node = _node_record(
+            "topic",
+            topic,
+            article,
+            session_id,
+            {
+                "tab": "Background",
+                "keywords": _article_keyword_tokens(topic)[:8],
+                "perspective": _node_perspective(
+                    "Topic node",
+                    "Analyze this topic across sources.",
+                    f"This article contributes to the topic: {topic}.",
+                    signals=[f"Topic label: {topic}", f"Source: {source_label}"],
+                    limitations=[
+                        "Topic grouping is keyword-based until broader clustering is added.",
+                        "Use compare before inferring ecosystem-level coverage patterns.",
+                    ],
+                    actions=[{"type": "compare", "label": "Compare this story", "href": compare_href}],
+                ),
+            },
+            source_id=article.get("source_id"),
+        )
+        topic_nodes.append(node)
+        nodes.append(node)
+        edges.append(
+            _edge_record(
+                article_node["id"],
+                node["id"],
+                "covers_topic",
+                weight=0.68,
+                evidence=[{"field": "topics", "value": topic}],
+                session_id=session_id,
+            )
+        )
+
+    claim_nodes = []
+    for claim in claims[:8]:
+        node = _node_record(
+            "claim",
+            claim,
+            article,
+            session_id,
+            {
+                "tab": "Claims",
+                "claim": claim,
+                "perspective": _node_perspective(
+                    "Claim node",
+                    "Compare this claim across agencies and sources.",
+                    _compact_text(claim, limit=320),
+                    signals=[f"Source: {source_label}", f"Article confidence: {round(confidence, 2)}"],
+                    limitations=[
+                        "Claim extraction captures what is asserted, not whether it is true.",
+                        "Cross-source confirmation requires compare and OSINT context.",
+                    ],
+                    actions=[{"type": "compare", "label": "Compare related coverage", "href": compare_href}],
+                ),
+            },
+            claim_text=claim,
+            source_id=article.get("source_id"),
+        )
+        claim_nodes.append(node)
+        nodes.append(node)
+        edges.append(
+            _edge_record(
+                article_node["id"],
+                node["id"],
+                "contains_claim",
+                weight=0.82,
+                evidence=[{"field": "key_claims", "value": claim}],
+                session_id=session_id,
+            )
+        )
+        if topic_nodes:
+            edges.append(
+                _edge_record(
+                    node["id"],
+                    topic_nodes[0]["id"],
+                    "relates_to_topic",
+                    weight=0.52,
+                    evidence=[{"field": "claim_topic_link", "value": topic_nodes[0]["label"]}],
+                    session_id=session_id,
+                )
+            )
+
+    narrative_nodes = []
+    for frame in frames[:5]:
+        node = _node_record(
+            "narrative",
+            frame,
+            article,
+            session_id,
+            {
+                "tab": "Summary",
+                "frame": frame,
+                "tone": narrative.get("tone"),
+                "implied_causality": narrative.get("implied_causality"),
+                "missing_context": missing_context,
+                "perspective": _node_perspective(
+                    "Narrative node",
+                    "Analyze this article through its framing pattern.",
+                    f"The story is framed around: {frame}.",
+                    signals=[
+                        f"Tone: {narrative.get('tone') or 'unknown'}",
+                        f"Implied causality: {_compact_text(narrative.get('implied_causality'), fallback='not extracted', limit=140)}",
+                    ],
+                    limitations=[
+                        "Framing labels are analytic summaries and can miss rhetorical nuance.",
+                        "Narrative comparison needs other source coverage for contrast.",
+                    ],
+                ),
+            },
+            source_id=article.get("source_id"),
+        )
+        narrative_nodes.append(node)
+        nodes.append(node)
+        edges.append(
+            _edge_record(
+                article_node["id"],
+                node["id"],
+                "framed_as",
+                weight=0.72,
+                evidence=[{"field": "narrative_framing", "value": frame}],
+                session_id=session_id,
+            )
+        )
+        if claim_nodes:
+            edges.append(
+                _edge_record(
+                    node["id"],
+                    claim_nodes[0]["id"],
+                    "frames_claim",
+                    weight=0.5,
+                    evidence=[{"field": "dominant_claim", "value": claim_nodes[0]["label"]}],
+                    session_id=session_id,
+                )
+            )
+
+    for entity_type, label in _entity_nodes_from_intelligence(intelligence):
+        node = _node_record(
+            entity_type,
+            label,
+            article,
+            session_id,
+            {
+                "tab": "Background",
+                "entity_type": entity_type,
+                "perspective": _node_perspective(
+                    f"{entity_type.title()} node",
+                    f"Analyze this story through the {entity_type} reference.",
+                    f"{label} appears in the extracted entity set for this article.",
+                    signals=[f"Entity type: {entity_type}", f"Source: {source_label}"],
+                    limitations=[
+                        "Entity extraction can be incomplete or misclassified.",
+                        "Use source article and OSINT context before interpreting entity significance.",
+                    ],
+                ),
+            },
+            source_id=article.get("source_id"),
+        )
+        nodes.append(node)
+        edges.append(
+            _edge_record(
+                article_node["id"],
+                node["id"],
+                f"mentions_{entity_type}",
+                weight=0.48,
+                evidence=[{"field": "entities", "value": label}],
+                session_id=session_id,
+            )
+        )
+
+    return nodes, edges
+
+
+def _persist_article_node_graph(article: dict, nodes: list[dict], edges: list[dict], session_id: str) -> None:
+    article_id = article.get("id")
+    if not article_id:
+        return
+
+    if not database_enabled():
+        existing_ids = {
+            node["id"]
+            for node in NODES
+            if node.get("ingested_article_id") == article_id
+            and (node.get("session_id") or ANONYMOUS_SESSION_ID) == session_id
+        }
+        NODES[:] = [
+            node
+            for node in NODES
+            if not (
+                node.get("ingested_article_id") == article_id
+                and (node.get("session_id") or ANONYMOUS_SESSION_ID) == session_id
+            )
+        ]
+        NODE_EDGES[:] = [
+            edge
+            for edge in NODE_EDGES
+            if edge.get("from_node_id") not in existing_ids and edge.get("to_node_id") not in existing_ids
+        ]
+        NODES.extend(nodes)
+        NODE_EDGES.extend(edges)
+        return
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    delete from public.nodes
+                    where ingested_article_id::text = %s
+                    and coalesce(session_id, %s) = %s;
+                    """,
+                    (article_id, ANONYMOUS_SESSION_ID, session_id),
+                )
+                cur.executemany(
+                    """
+                    insert into public.nodes (
+                        id, session_id, node_type, label, slug, source_id,
+                        ingested_article_id, topic_id, claim_text, node_metadata,
+                        created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    [
+                        (
+                            node["id"],
+                            node.get("session_id"),
+                            node["node_type"],
+                            node["label"],
+                            node.get("slug"),
+                            node.get("source_id"),
+                            node.get("ingested_article_id"),
+                            node.get("topic_id"),
+                            node.get("claim_text"),
+                            Json(node.get("node_metadata") or {}),
+                            node.get("created_at"),
+                            node.get("updated_at"),
+                        )
+                        for node in nodes
+                    ],
+                )
+                cur.executemany(
+                    """
+                    insert into public.node_edges (
+                        id, session_id, from_node_id, to_node_id,
+                        edge_type, weight, evidence, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    [
+                        (
+                            edge["id"],
+                            edge.get("session_id"),
+                            edge["from_node_id"],
+                            edge["to_node_id"],
+                            edge["edge_type"],
+                            edge["weight"],
+                            Json(edge.get("evidence") or []),
+                            edge.get("created_at"),
+                        )
+                        for edge in edges
+                    ],
+                )
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not persist article node graph: {exc}") from exc
+
+
+def _node_type_counts(nodes: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for node in nodes:
+        counts[node["node_type"]] = counts.get(node["node_type"], 0) + 1
+    return counts
+
+
+def build_article_node_graph(
+    article_id: str,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    node_type: str | None = None,
+) -> dict | None:
+    article = get_ingested_article_record(article_id)
+    if not article:
+        return None
+
+    nodes, edges = _build_article_node_records(article, session_id=session_id)
+    _persist_article_node_graph(article, nodes, edges, session_id=session_id)
+
+    selected_node = None
+    if node_type:
+        selected_node = next((node for node in nodes if node.get("node_type") == node_type), None)
+    if not selected_node:
+        selected_node = next((node for node in nodes if node.get("node_type") == "article"), nodes[0] if nodes else None)
+
+    return {
+        "article_id": article_id,
+        "status": "materialized",
+        "nodes": nodes,
+        "edges": edges,
+        "node_type_counts": _node_type_counts(nodes),
+        "selected_node": selected_node,
+        "selected_perspective": (selected_node or {}).get("node_metadata", {}).get("perspective") if selected_node else None,
+        "limitations": [
+            "Node analysis exposes structured perspectives, not final factual judgment.",
+            "Author/source/topic patterns need more articles before trend-level conclusions.",
+            "OSINT references are added in the next Phase 2 step.",
+        ],
+    }
+
+
 def build_ingested_article_detail(
     article_id: str,
     session_id: str = ANONYMOUS_SESSION_ID,
@@ -2359,31 +3017,18 @@ def build_ingested_article_detail(
         "similarity_keywords": article.get("comparison_keywords") or [],
         "event_fingerprint": article.get("event_fingerprint") or "",
     }
-    key_claims = analysis.get("key_claims") or intelligence.get("key_claims") or []
-    frames = analysis.get("narrative_framing") or []
-    topics = analysis.get("topics") or []
+    node_graph = build_article_node_graph(article_id, session_id=session_id)
 
     nodes_preview = [
         {
-            "node_type": "article",
-            "label": article.get("title") or article.get("url") or "Article",
+            "id": node.get("id"),
+            "node_type": node.get("node_type"),
+            "label": node.get("label"),
+            "tab": (node.get("node_metadata") or {}).get("tab"),
             "status": article.get("analysis_status") or "pending",
         }
+        for node in (node_graph or {}).get("nodes", [])[:14]
     ]
-    if source:
-        nodes_preview.append(
-            {
-                "node_type": "source",
-                "label": source.get("name") or "Source",
-                "source_type": source.get("source_type"),
-            }
-        )
-    for topic in topics[:4]:
-        nodes_preview.append({"node_type": "topic", "label": topic})
-    for claim in key_claims[:4]:
-        nodes_preview.append({"node_type": "claim", "label": claim})
-    for frame in frames[:3]:
-        nodes_preview.append({"node_type": "narrative", "label": frame})
 
     return {
         "article": article,
@@ -2393,6 +3038,7 @@ def build_ingested_article_detail(
         "intelligence": intelligence,
         "feed_card": feed_card,
         "nodes_preview": nodes_preview,
+        "node_graph": node_graph,
         "comparison_hooks": comparison_hooks,
         "tabs": [
             "Summary",
@@ -2406,7 +3052,7 @@ def build_ingested_article_detail(
         "limitations": [
             "This detail view reports extracted structure, not truth certainty.",
             "OSINT and compare panels are bounded context surfaces and should not be treated as final judgment.",
-            "Full node graph materialization is planned for the node-based analysis step.",
+            "Node perspectives are derived from saved analysis and source metadata; they improve as more articles are ingested.",
         ],
     }
 

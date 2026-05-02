@@ -42,6 +42,8 @@ def _reset_memory_store() -> None:
         store.SOURCE_FEEDS,
         store.INGESTED_ARTICLES,
         store.ARTICLE_COMPARISONS,
+        store.NODES,
+        store.NODE_EDGES,
     ):
         collection.clear()
 
@@ -328,6 +330,16 @@ def main() -> int:
     assert article_detail_payload["source"]["name"] == "Example Daily", article_detail_payload
     assert article_detail_payload["comparison_hooks"]["event_fingerprint"] == article_detail["event_fingerprint"], article_detail_payload
     assert any(node["node_type"] == "claim" for node in article_detail_payload["nodes_preview"]), article_detail_payload
+    assert article_detail_payload["node_graph"]["node_type_counts"]["article"] == 1, article_detail_payload
+    assert article_detail_payload["node_graph"]["node_type_counts"]["claim"] >= 1, article_detail_payload
+    assert article_detail_payload["node_graph"]["edges"], article_detail_payload
+    article_nodes = _assert_ok(
+        client.get(f"/api/v1/sources/articles/{ingested_article_id}/nodes?node_type=author", headers=headers),
+        "sources/article-nodes",
+    ).json()
+    assert article_nodes["selected_node"]["node_type"] == "author", article_nodes
+    assert article_nodes["selected_perspective"]["question"], article_nodes
+    assert store.NODES and store.NODE_EDGES, article_nodes
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

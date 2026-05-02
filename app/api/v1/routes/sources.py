@@ -6,6 +6,7 @@ from pydantic import BaseModel, HttpUrl
 from app.core.session import get_session_id
 from app.services.feed.store import (
     FeedStoreError,
+    build_article_node_graph,
     build_ingested_article_detail,
     create_source_feed_record,
     create_source_record,
@@ -129,6 +130,21 @@ async def get_ingested_article(
     if not detail:
         raise HTTPException(status_code=404, detail="Ingested article not found")
     return detail
+
+
+@router.get("/articles/{article_id}/nodes")
+async def get_ingested_article_nodes(
+    article_id: str,
+    session_id: str = Depends(get_session_id),
+    node_type: str | None = Query(default=None),
+):
+    try:
+        graph = build_article_node_graph(article_id, session_id=session_id, node_type=node_type)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not graph:
+        raise HTTPException(status_code=404, detail="Ingested article not found")
+    return graph
 
 
 @router.get("/{source_id}")

@@ -14,7 +14,7 @@ This deployable MVP includes:
 - source intelligence profiles
 - onboarding setup flow
 - Phase 2 source records, source feeds, RSS sync, and ingested-article feed cards
-- Phase 2 schema foundation for nodes and comparisons
+- Phase 2 node-based article detail and article-id comparisons
 
 Run locally:
 
@@ -110,9 +110,10 @@ curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
 
 curl http://localhost:8000/api/v1/sources/<source_id>/articles
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>
+curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, and node preview. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, and materialized `node_graph`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -173,7 +174,8 @@ Phase 2 implementation status:
 - Step 3 complete: `POST /api/v1/analyze` accepts `ingested_article_id`, links analysis back to ingested articles, enriches existing source-ingested feed cards, and returns structured Phase 2 intelligence.
 - Step 4 complete: feed cards and article detail hydrate from persisted ingested-article analysis, including comparison hooks and node preview.
 - Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison, and persists `article_comparisons`.
-- Next steps: node-based detail views, bounded OSINT context, and default source seeds.
+- Step 6 complete: article detail materializes `nodes` and `node_edges`, exposes node perspectives, and supports node-based detail tabs in the frontend.
+- Next steps: bounded OSINT context and default source seeds.
 
 Production deploy checklist:
 
