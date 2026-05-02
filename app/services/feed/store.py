@@ -34,6 +34,7 @@ AUTHORS = []
 SOURCES = []
 SOURCE_FEEDS = []
 INGESTED_ARTICLES = []
+ARTICLE_COMPARISONS = []
 
 _SCHEMA_READY = False
 _HIGH_PRIORITY_ALERT_THRESHOLD = 0.75
@@ -2408,6 +2409,147 @@ def build_ingested_article_detail(
             "Full node graph materialization is planned for the node-based analysis step.",
         ],
     }
+
+
+def _row_to_article_comparison(row: dict) -> dict:
+    created_at = row.get("created_at")
+    updated_at = row.get("updated_at")
+    if isinstance(created_at, datetime):
+        created_at = created_at.isoformat()
+    if isinstance(updated_at, datetime):
+        updated_at = updated_at.isoformat()
+
+    return {
+        "id": str(row.get("id")),
+        "base_article_id": str(row.get("base_article_id")) if row.get("base_article_id") else None,
+        "comparison_article_id": (
+            str(row.get("comparison_article_id")) if row.get("comparison_article_id") else None
+        ),
+        "similarity_score": _as_float(row.get("similarity_score"), 0.0),
+        "shared_claims": row.get("shared_claims") or [],
+        "unique_claims_by_source": row.get("unique_claims_by_source") or [],
+        "framing_differences": row.get("framing_differences") or [],
+        "tone_differences": row.get("tone_differences") or [],
+        "missing_context": row.get("missing_context") or [],
+        "timeline_difference": row.get("timeline_difference") or {},
+        "source_difference": row.get("source_difference") or {},
+        "confidence": _as_float(row.get("confidence"), 0.0),
+        "comparison_payload": row.get("comparison_payload") or {},
+        "created_at": created_at or now_iso(),
+        "updated_at": updated_at or created_at or now_iso(),
+    }
+
+
+def save_article_comparison_record(
+    base_article_id: str,
+    comparison_article_id: str,
+    similarity_score: float,
+    shared_claims: list[dict] | None = None,
+    unique_claims_by_source: list[dict] | None = None,
+    framing_differences: list[dict] | None = None,
+    tone_differences: list[dict] | None = None,
+    missing_context: list[str] | None = None,
+    timeline_difference: dict | None = None,
+    source_difference: dict | None = None,
+    confidence: float = 0.0,
+    comparison_payload: dict | None = None,
+) -> dict:
+    score = round(max(0.0, min(float(similarity_score or 0.0), 1.0)), 3)
+    confidence_value = round(max(0.0, min(float(confidence or 0.0), 1.0)), 3)
+    payload = comparison_payload or {}
+
+    if not database_enabled():
+        existing = next(
+            (
+                item
+                for item in ARTICLE_COMPARISONS
+                if item.get("base_article_id") == base_article_id
+                and item.get("comparison_article_id") == comparison_article_id
+            ),
+            None,
+        )
+        now = now_iso()
+        record = {
+            "id": existing.get("id") if existing else str(uuid4()),
+            "base_article_id": base_article_id,
+            "comparison_article_id": comparison_article_id,
+            "similarity_score": score,
+            "shared_claims": shared_claims or [],
+            "unique_claims_by_source": unique_claims_by_source or [],
+            "framing_differences": framing_differences or [],
+            "tone_differences": tone_differences or [],
+            "missing_context": missing_context or [],
+            "timeline_difference": timeline_difference or {},
+            "source_difference": source_difference or {},
+            "confidence": confidence_value,
+            "comparison_payload": payload,
+            "created_at": existing.get("created_at") if existing else now,
+            "updated_at": now,
+        }
+        if existing:
+            existing.clear()
+            existing.update(record)
+        else:
+            ARTICLE_COMPARISONS.insert(0, record)
+        return record
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.article_comparisons (
+                        id,
+                        base_article_id,
+                        comparison_article_id,
+                        similarity_score,
+                        shared_claims,
+                        unique_claims_by_source,
+                        framing_differences,
+                        tone_differences,
+                        missing_context,
+                        timeline_difference,
+                        source_difference,
+                        confidence,
+                        comparison_payload,
+                        created_at,
+                        updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                    on conflict (base_article_id, comparison_article_id) do update set
+                        similarity_score = excluded.similarity_score,
+                        shared_claims = excluded.shared_claims,
+                        unique_claims_by_source = excluded.unique_claims_by_source,
+                        framing_differences = excluded.framing_differences,
+                        tone_differences = excluded.tone_differences,
+                        missing_context = excluded.missing_context,
+                        timeline_difference = excluded.timeline_difference,
+                        source_difference = excluded.source_difference,
+                        confidence = excluded.confidence,
+                        comparison_payload = excluded.comparison_payload,
+                        updated_at = now()
+                    returning *;
+                    """,
+                    (
+                        str(uuid4()),
+                        base_article_id,
+                        comparison_article_id,
+                        score,
+                        Json(shared_claims or []),
+                        Json(unique_claims_by_source or []),
+                        Json(framing_differences or []),
+                        Json(tone_differences or []),
+                        Json(missing_context or []),
+                        Json(timeline_difference or {}),
+                        Json(source_difference or {}),
+                        confidence_value,
+                        Json(payload),
+                    ),
+                )
+                return _row_to_article_comparison(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save article comparison: {exc}") from exc
 
 
 def create_feed_subscription(

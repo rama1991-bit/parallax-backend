@@ -34,7 +34,7 @@ These frontend surfaces have real backend support:
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
 - `/sources`: `GET/POST /api/v1/sources`, `POST /api/v1/sources/{source_id}/sync`, source feed routes, hydrated article detail routes
-- `/compare`: `POST /api/v1/compare`
+- `/compare`: `POST /api/v1/compare`, `GET /api/v1/compare/{article_id}`
 - `/notifications`: `GET /api/v1/alerts`, read/read-all/unread count
 - `/reports/{id}`: report detail, save/unsave, JSON/Markdown export
 - `/saved`: `GET /api/v1/saved-reports`
@@ -50,7 +50,7 @@ Known MVP gaps:
 - Feed and source sync are manual/schedulable API calls; recurring background ingestion is not implemented yet.
 - Analyze uses heuristic mode unless `AI_PROVIDER=openai` is configured.
 - Brief share tokens are signed but not revocable because briefs are derived, not persisted.
-- Phase 2 source ingestion, ingested-article analysis linkage, hydrated article detail, and feed card hydration exist. Article-id compare, node detail tabs, OSINT panels, and default source seeds are follow-up implementation steps.
+- Phase 2 source ingestion, ingested-article analysis linkage, hydrated article detail, feed card hydration, and article-id compare exist. Node detail tabs, OSINT panels, and default source seeds are follow-up implementation steps.
 
 ## Smoke
 
@@ -66,7 +66,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, ingested-article analysis persistence, hydrated article detail, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, ingested-article analysis persistence, hydrated article detail, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 

@@ -71,9 +71,11 @@ Compare flow:
 curl -X POST http://localhost:8000/api/v1/compare \
   -H "Content-Type: application/json" \
   -d "{\"left_url\":\"https://example.com/a\",\"right_url\":\"https://example.com/b\"}"
+
+curl http://localhost:8000/api/v1/compare/<ingested_article_id>
 ```
 
-Compare fetches, analyzes, and saves both articles for the current session, then returns claim overlap and framing divergence signals.
+URL compare fetches, analyzes, and saves both articles for the current session, then returns claim overlap and framing divergence signals. Article-id compare uses persisted `ingested_articles` to find similar coverage across sources, returns the Phase 2 `base_article`, `similar_articles`, and structured `comparison` object, and persists lightweight `article_comparisons` rows for matching pairs.
 
 Topic monitor flow:
 
@@ -170,7 +172,8 @@ Phase 2 implementation status:
 - Step 2 complete: `/api/v1/sources` source manager, source feed records, RSS sync, ingested article persistence, and `ingested_article` feed cards.
 - Step 3 complete: `POST /api/v1/analyze` accepts `ingested_article_id`, links analysis back to ingested articles, enriches existing source-ingested feed cards, and returns structured Phase 2 intelligence.
 - Step 4 complete: feed cards and article detail hydrate from persisted ingested-article analysis, including comparison hooks and node preview.
-- Next steps: article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
+- Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison, and persists `article_comparisons`.
+- Next steps: node-based detail views, bounded OSINT context, and default source seeds.
 
 Production deploy checklist:
 

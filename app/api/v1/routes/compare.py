@@ -1,12 +1,12 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 
 from app.core.session import get_session_id
 from app.services.analysis import AIAnalysisError, analyze_article as run_article_analysis
 from app.services.articles import ArticleFetchError, fetch_article
-from app.services.compare import build_compare_result
+from app.services.compare import build_compare_result, build_ingested_article_compare_result
 from app.services.feed.store import (
     FeedStoreError,
     QuotaExceededError,
@@ -75,3 +75,17 @@ async def compare_articles(payload: CompareRequest, session_id: str = Depends(ge
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return build_compare_result(left_card, right_card, usage=usage)
+
+
+@router.get("/{article_id}")
+async def compare_ingested_article(
+    article_id: str,
+    limit: int = Query(default=8, ge=1, le=25),
+):
+    try:
+        return build_ingested_article_compare_result(article_id, limit=limit)
+    except FeedStoreError as exc:
+        message = str(exc)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=503, detail=message) from exc

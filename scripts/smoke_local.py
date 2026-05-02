@@ -41,6 +41,7 @@ def _reset_memory_store() -> None:
         store.SOURCES,
         store.SOURCE_FEEDS,
         store.INGESTED_ARTICLES,
+        store.ARTICLE_COMPARISONS,
     ):
         collection.clear()
 
@@ -202,6 +203,47 @@ def main() -> int:
     assert ingested_analysis["ingested_article_id"] == ingested_article_id, ingested_analysis
     assert ingested_analysis["card"]["payload"]["analysis_status"] == "analyzed", ingested_analysis
     assert ingested_analysis["intelligence"]["article"]["url"] == "https://example.com/grid-resilience-plan", ingested_analysis
+
+    comparison_source = store.create_source_record(
+        name="Regional Grid Monitor",
+        website_url="https://regional.example.com",
+        country="Canada",
+        language="English",
+        region="North America",
+        source_size="small",
+        source_type="independent",
+    )
+    comparison_feed = store.create_source_feed_record(
+        source_id=comparison_source["id"],
+        feed_url="https://regional.example.com/rss.xml",
+        feed_type="rss",
+        title="Regional Grid Monitor RSS",
+    )
+    comparison_ingested = store.save_ingested_articles(
+        comparison_source,
+        comparison_feed,
+        [
+            {
+                "external_id": "source-item-2",
+                "title": "Agency unveils grid resilience plan",
+                "summary": "Regional coverage says regulators outlined a grid resilience plan with cost questions.",
+                "url": "https://regional.example.com/grid-resilience-plan",
+                "published_at": "2026-05-02T11:30:00+00:00",
+                "raw": {"fixture": True},
+            }
+        ],
+        session_id=session_id,
+    )
+    assert comparison_ingested["articles"], comparison_ingested
+
+    article_compare = _assert_ok(
+        client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
+        "compare/ingested-article",
+    ).json()
+    assert article_compare["base_article"]["id"] == ingested_article_id, article_compare
+    assert article_compare["similar_articles"], article_compare
+    assert article_compare["comparison"]["confidence"] > 0, article_compare
+    assert store.ARTICLE_COMPARISONS, article_compare
 
     article = ExtractedArticle(
         url="https://example.com/analysis",
