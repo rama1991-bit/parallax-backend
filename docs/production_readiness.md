@@ -30,7 +30,7 @@ python scripts/apply_migrations.py
 
 These frontend surfaces have real backend support:
 
-- `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze`
+- `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze` by URL or `ingested_article_id`
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
 - `/sources`: `GET/POST /api/v1/sources`, `POST /api/v1/sources/{source_id}/sync`, source feed and article detail routes
@@ -50,7 +50,7 @@ Known MVP gaps:
 - Feed and source sync are manual/schedulable API calls; recurring background ingestion is not implemented yet.
 - Analyze uses heuristic mode unless `AI_PROVIDER=openai` is configured.
 - Brief share tokens are signed but not revocable because briefs are derived, not persisted.
-- Phase 2 source ingestion exists, but analyzed-article hydration, article-id compare, node detail tabs, OSINT panels, and default source seeds are follow-up implementation steps.
+- Phase 2 source ingestion and ingested-article analysis linkage exist, but richer persisted article detail hydration, article-id compare, node detail tabs, OSINT panels, and default source seeds are follow-up implementation steps.
 
 ## Smoke
 
@@ -66,7 +66,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, ingested-article analysis persistence, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 

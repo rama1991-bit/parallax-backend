@@ -14,10 +14,12 @@ from uuid import uuid4
 
 if os.getenv("PARALLAX_SMOKE_USE_CONFIG_DB", "").lower() not in {"1", "true", "yes"}:
     os.environ["DATABASE_URL"] = ""
+os.environ.setdefault("ANALYZE_COOLDOWN_SECONDS", "0")
 
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.api.v1.routes import analyze as analyze_route  # noqa: E402
 from app.api.v1.routes import sources as sources_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
@@ -179,6 +181,28 @@ def main() -> int:
     assert len(ingested["cards"]) == 1, ingested
     ingested_article_id = ingested["articles"][0]["id"]
 
+    original_fetch_article = analyze_route.fetch_article
+
+    async def fake_fetch_article(url: str):
+        raise analyze_route.ArticleFetchError("Fixture fetch failure for metadata fallback.")
+
+    try:
+        analyze_route.fetch_article = fake_fetch_article
+        ingested_analysis = _assert_ok(
+            client.post(
+                "/api/v1/analyze",
+                headers=headers,
+                json={"ingested_article_id": ingested_article_id},
+            ),
+            "analyze/ingested-article",
+        ).json()
+    finally:
+        analyze_route.fetch_article = original_fetch_article
+
+    assert ingested_analysis["ingested_article_id"] == ingested_article_id, ingested_analysis
+    assert ingested_analysis["card"]["payload"]["analysis_status"] == "analyzed", ingested_analysis
+    assert ingested_analysis["intelligence"]["article"]["url"] == "https://example.com/grid-resilience-plan", ingested_analysis
+
     article = ExtractedArticle(
         url="https://example.com/analysis",
         final_url="https://example.com/analysis",
@@ -188,31 +212,30 @@ def main() -> int:
         text="Officials reported grid costs because market prices changed. " * 35,
         excerpt="Officials reported grid costs because market prices changed.",
     )
-    card = store.save_analysis_card(
-        article,
-        {
-            "title": "Energy market analysis",
-            "summary": "High-priority article analysis for production smoke checks.",
-            "key_claims": [
-                "Officials reported grid costs",
-                "Market prices changed",
-            ],
-            "narrative_framing": [
-                "economic_consequence",
-                "institutional_response",
-            ],
-            "entities": ["Example Wire"],
-            "topics": ["energy transition"],
-            "confidence": 0.89,
-            "priority": "high",
-        },
-        session_id=session_id,
-    )
+
+    async def fake_success_fetch_article(url: str):
+        return article
+
+    try:
+        analyze_route.fetch_article = fake_success_fetch_article
+        url_analysis = _assert_ok(
+            client.post(
+                "/api/v1/analyze",
+                headers=headers,
+                json={"url": article.url},
+            ),
+            "analyze/url",
+        ).json()
+    finally:
+        analyze_route.fetch_article = original_fetch_article
+
+    card = url_analysis["card"]
+    assert url_analysis["intelligence"]["article"]["title"] == "Energy market analysis", url_analysis
     store.update_report_saved(card["report_id"], session_id=session_id, is_saved=True)
 
     feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
     assert len(feed["cards"]) >= 5, feed
-    assert any(item["card_type"] == "ingested_article" for item in feed["cards"]), feed
+    assert any((item.get("payload") or {}).get("ingested_article_id") == ingested_article_id for item in feed["cards"]), feed
 
     alerts = _assert_ok(client.get("/api/v1/alerts", headers=headers), "alerts").json()
     assert alerts["unread_count"] >= 4, alerts
@@ -245,11 +268,13 @@ def main() -> int:
         "sources/articles",
     ).json()["articles"]
     assert source_articles and source_articles[0]["id"] == ingested_article_id, source_articles
+    assert source_articles[0]["analysis_status"] == "analyzed", source_articles
     article_detail = _assert_ok(
         client.get(f"/api/v1/sources/articles/{ingested_article_id}"),
         "sources/article-detail",
     ).json()["article"]
     assert article_detail["event_fingerprint"], article_detail
+    assert article_detail["analysis"]["intelligence"]["scores"]["cross_source_need"] > 0, article_detail
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

@@ -57,9 +57,13 @@ Analyze flow:
 curl -X POST http://localhost:8000/api/v1/analyze \
   -H "Content-Type: application/json" \
   -d "{\"url\":\"https://example.com/article\"}"
+
+curl -X POST http://localhost:8000/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d "{\"ingested_article_id\":\"<ingested_article_id>\"}"
 ```
 
-The endpoint fetches and extracts article text, produces structured narrative analysis, saves a feed card when `DATABASE_URL` points at Postgres/Supabase, and returns the normalized card for the frontend to insert into the feed.
+The endpoint fetches and extracts article text, produces structured narrative analysis, saves a feed card when `DATABASE_URL` points at Postgres/Supabase, and returns the normalized card for the frontend to insert into the feed. When called with `ingested_article_id`, the analysis is linked back to `ingested_articles.article_analysis_id`, marks the article as `analyzed`, enriches the existing feed card, and returns a Phase 2 `intelligence` object with article, claims, entities, narrative, source analysis, comparison hooks, and scores.
 
 Compare flow:
 
@@ -163,7 +167,8 @@ Phase 2 implementation status:
 
 - Step 1 complete: database schema for `sources`, `source_feeds`, `ingested_articles`, `nodes`, `node_edges`, and `article_comparisons`.
 - Step 2 complete: `/api/v1/sources` source manager, source feed records, RSS sync, ingested article persistence, and `ingested_article` feed cards.
-- Next steps: persist analyzed articles back onto ingested articles, feed hydration from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
+- Step 3 complete: `POST /api/v1/analyze` accepts `ingested_article_id`, links analysis back to ingested articles, enriches existing source-ingested feed cards, and returns structured Phase 2 intelligence.
+- Next steps: feed hydration/detail from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
 
 Production deploy checklist:
 

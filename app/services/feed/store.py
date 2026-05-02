@@ -1327,6 +1327,18 @@ def _row_to_ingested_article_record(row: dict) -> dict:
         "created_at": _row_created_at(row),
         "updated_at": _row_created_at({"created_at": row.get("updated_at") or row.get("created_at")}),
     }
+    analysis = row.get("analysis")
+    if analysis:
+        analysis_created_at = row.get("analysis_created_at")
+        if isinstance(analysis_created_at, datetime):
+            analysis_created_at = analysis_created_at.isoformat()
+        article["article_analysis_id"] = (
+            str(row.get("analysis_id"))
+            if row.get("analysis_id")
+            else article.get("article_analysis_id")
+        )
+        article["analysis"] = analysis
+        article["analysis_created_at"] = analysis_created_at
 
     if row.get("source_name"):
         article["source"] = {
@@ -1337,6 +1349,8 @@ def _row_to_ingested_article_record(row: dict) -> dict:
             "language": row.get("source_language"),
             "source_size": row.get("source_size"),
             "source_type": row.get("source_type"),
+            "credibility_notes": row.get("source_credibility_notes"),
+            "political_context": row.get("source_political_context"),
         }
     if row.get("feed_url"):
         article["source_feed"] = {
@@ -2105,16 +2119,22 @@ def list_ingested_article_records(source_id: str | None = None, limit: int = 100
                     f"""
                     select
                         ia.*,
+                        aa.id as analysis_id,
+                        aa.analysis,
+                        aa.created_at as analysis_created_at,
                         s.name as source_name,
                         s.website_url as source_website_url,
                         s.country as source_country,
                         s.language as source_language,
                         s.source_size,
                         s.source_type,
+                        s.credibility_notes as source_credibility_notes,
+                        s.political_context as source_political_context,
                         sf.feed_url,
                         sf.feed_type,
                         sf.title as feed_title
                     from public.ingested_articles ia
+                    left join public.article_analyses aa on aa.id = ia.article_analysis_id
                     left join public.sources s on s.id = ia.source_id
                     left join public.source_feeds sf on sf.id = ia.source_feed_id
                     {where_sql}
@@ -2143,16 +2163,22 @@ def get_ingested_article_record(article_id: str) -> dict | None:
                     """
                     select
                         ia.*,
+                        aa.id as analysis_id,
+                        aa.analysis,
+                        aa.created_at as analysis_created_at,
                         s.name as source_name,
                         s.website_url as source_website_url,
                         s.country as source_country,
                         s.language as source_language,
                         s.source_size,
                         s.source_type,
+                        s.credibility_notes as source_credibility_notes,
+                        s.political_context as source_political_context,
                         sf.feed_url,
                         sf.feed_type,
                         sf.title as feed_title
                     from public.ingested_articles ia
+                    left join public.article_analyses aa on aa.id = ia.article_analysis_id
                     left join public.sources s on s.id = ia.source_id
                     left join public.source_feeds sf on sf.id = ia.source_feed_id
                     where ia.id::text = %s
@@ -2509,6 +2535,419 @@ def save_feed_items(
         return {"items": new_items, "cards": new_cards}
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not save feed items: {exc}") from exc
+
+
+def _source_from_ingested_article(ingested_article: dict) -> dict:
+    source_value = ingested_article.get("source") or {}
+    source = source_value if isinstance(source_value, dict) else {}
+    source_name = source.get("name") or (source_value if isinstance(source_value, str) else None)
+    return {
+        "id": ingested_article.get("source_id") or source.get("id"),
+        "name": source_name or ingested_article.get("source_name") or "Unknown source",
+        "website_url": source.get("website_url"),
+        "country": ingested_article.get("country") or source.get("country"),
+        "language": ingested_article.get("language") or source.get("language"),
+        "source_size": source.get("source_size"),
+        "source_type": source.get("source_type"),
+        "credibility_notes": source.get("credibility_notes"),
+        "political_context": source.get("political_context"),
+    }
+
+
+def _source_feed_from_ingested_article(ingested_article: dict) -> dict:
+    source_feed_value = ingested_article.get("source_feed") or {}
+    source_feed = source_feed_value if isinstance(source_feed_value, dict) else {}
+    return {
+        "id": ingested_article.get("source_feed_id") or source_feed.get("id"),
+        "feed_url": source_feed.get("feed_url"),
+        "feed_type": source_feed.get("feed_type"),
+        "title": source_feed.get("title"),
+    }
+
+
+def _build_analyzed_ingested_card(
+    ingested_article: dict,
+    article: ExtractedArticle,
+    analysis: dict,
+    session_id: str,
+    structured_analysis: dict | None = None,
+    existing_card: dict | None = None,
+) -> dict:
+    card = build_card(article, analysis, session_id=session_id)
+    source = _source_from_ingested_article(ingested_article)
+    source_feed = _source_feed_from_ingested_article(ingested_article)
+    analysis_payload = {**analysis}
+    if structured_analysis:
+        analysis_payload["intelligence"] = structured_analysis
+
+    if existing_card:
+        card["id"] = existing_card.get("id") or card["id"]
+        card["is_read"] = bool(existing_card.get("is_read"))
+        card["is_saved"] = bool(existing_card.get("is_saved"))
+        card["is_dismissed"] = bool(existing_card.get("is_dismissed"))
+        card["created_at"] = existing_card.get("created_at") or card["created_at"]
+
+    card.update(
+        {
+            "source_id": source.get("id"),
+            "source_feed_id": source_feed.get("id"),
+            "ingested_article_id": ingested_article.get("id"),
+            "node_id": None,
+            "comparison_id": None,
+            "analysis": analysis_payload,
+        }
+    )
+    card["payload"] = {
+        **(card.get("payload") or {}),
+        "source_id": source.get("id"),
+        "source_name": source.get("name"),
+        "source_type": source.get("source_type"),
+        "source_size": source.get("source_size"),
+        "source_country": source.get("country"),
+        "source_language": source.get("language"),
+        "source_feed_id": source_feed.get("id"),
+        "source_feed_type": source_feed.get("feed_type"),
+        "feed_url": source_feed.get("feed_url"),
+        "ingested_article_id": ingested_article.get("id"),
+        "published_at": ingested_article.get("published_at"),
+        "event_fingerprint": ingested_article.get("event_fingerprint"),
+        "comparison_keywords": ingested_article.get("comparison_keywords") or [],
+        "analysis_status": "analyzed",
+        "intelligence": structured_analysis,
+    }
+    card["recommendations"] = [
+        {
+            "type": "open_report",
+            "label": "Open report",
+            "href": f"/reports/{card['report_id']}",
+            "reason": "Review the structured analysis generated from the ingested article.",
+        },
+        {
+            "type": "compare",
+            "label": "Compare story",
+            "href": f"/compare?articleId={ingested_article.get('id')}",
+            "reason": "Look for similar coverage from other sources.",
+        },
+        {
+            "type": "open_source_article",
+            "label": "Open source article",
+            "href": article.final_url,
+            "reason": "Inspect the original publication before drawing conclusions.",
+        },
+    ]
+    card["explanation"] = {
+        "why_this_matters": (
+            "This ingested article has been converted into structured narrative intelligence "
+            "and linked back to its source record."
+        ),
+        "what_changed": {
+            "analysis_status": "analyzed",
+            "key_claims": analysis.get("key_claims") or [],
+            "narrative_framing": analysis.get("narrative_framing") or [],
+            "source": source.get("name"),
+        },
+        "recommended_action": "Open the report, then compare the same story across sources before acting on it.",
+    }
+    return card
+
+
+def mark_ingested_article_analysis_failed(
+    ingested_article_id: str,
+    error: str,
+) -> dict | None:
+    clean_error = _clean_text(error, 1000, "Analysis failed.")
+
+    if not database_enabled():
+        for article in INGESTED_ARTICLES:
+            if article.get("id") == ingested_article_id:
+                raw_metadata = article.get("raw_metadata") or {}
+                article["analysis_status"] = "failed"
+                article["raw_metadata"] = {**raw_metadata, "analysis_error": clean_error}
+                article["updated_at"] = now_iso()
+                return article
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    update public.ingested_articles
+                    set
+                        analysis_status = 'failed',
+                        raw_metadata = raw_metadata || %s::jsonb,
+                        updated_at = now()
+                    where id::text = %s
+                    returning *;
+                    """,
+                    (Json({"analysis_error": clean_error}), ingested_article_id),
+                )
+                row = cur.fetchone()
+                return _row_to_ingested_article_record(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not mark ingested article analysis failed: {exc}") from exc
+
+
+def save_ingested_article_analysis_card(
+    ingested_article: dict,
+    article: ExtractedArticle,
+    analysis: dict,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    structured_analysis: dict | None = None,
+) -> dict:
+    ingested_article_id = ingested_article.get("id")
+    if not ingested_article_id:
+        raise FeedStoreError("Ingested article id is required for analysis persistence.")
+
+    if not database_enabled():
+        existing_card = next(
+            (
+                card
+                for card in FEED_CARDS
+                if card.get("ingested_article_id") == ingested_article_id
+                and (card.get("session_id") or ANONYMOUS_SESSION_ID) == session_id
+            ),
+            None,
+        )
+        card = _build_analyzed_ingested_card(
+            ingested_article,
+            article,
+            analysis,
+            session_id=session_id,
+            structured_analysis=structured_analysis,
+            existing_card=existing_card,
+        )
+        for item in INGESTED_ARTICLES:
+            if item.get("id") == ingested_article_id:
+                item.update(
+                    {
+                        "article_analysis_id": card["article_id"],
+                        "title": article.title,
+                        "summary": analysis.get("summary") or item.get("summary"),
+                        "extracted_text": article.text,
+                        "analysis_status": "analyzed",
+                        "updated_at": now_iso(),
+                    }
+                )
+                if structured_analysis:
+                    item["analysis"] = {**analysis, "intelligence": structured_analysis}
+                else:
+                    item["analysis"] = analysis
+                break
+
+        if existing_card:
+            existing_card.clear()
+            existing_card.update(card)
+        else:
+            FEED_CARDS.insert(0, card)
+        return card
+
+    existing_card = None
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select {_card_columns()}
+                    from public.feed_cards
+                    where ingested_article_id::text = %s
+                    and coalesce(session_id, %s) = %s
+                    order by created_at desc
+                    limit 1;
+                    """,
+                    (ingested_article_id, ANONYMOUS_SESSION_ID, session_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    existing_card = _row_to_card(row)
+
+                card = _build_analyzed_ingested_card(
+                    ingested_article,
+                    article,
+                    analysis,
+                    session_id=session_id,
+                    structured_analysis=structured_analysis,
+                    existing_card=existing_card,
+                )
+                analysis_id = card["article_id"]
+                analysis_payload = card["analysis"]
+
+                cur.execute(
+                    """
+                    insert into public.article_analyses (
+                        id,
+                        session_id,
+                        ingested_article_id,
+                        url,
+                        final_url,
+                        title,
+                        source,
+                        domain,
+                        extracted_text,
+                        analysis
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    (
+                        analysis_id,
+                        card["session_id"],
+                        ingested_article_id,
+                        article.url,
+                        article.final_url,
+                        article.title,
+                        article.source,
+                        article.domain,
+                        article.text,
+                        Json(analysis_payload),
+                    ),
+                )
+                cur.execute(
+                    """
+                    update public.ingested_articles
+                    set
+                        article_analysis_id = %s,
+                        title = %s,
+                        summary = %s,
+                        extracted_text = %s,
+                        analysis_status = 'analyzed',
+                        updated_at = now()
+                    where id::text = %s;
+                    """,
+                    (
+                        analysis_id,
+                        article.title,
+                        analysis.get("summary") or ingested_article.get("summary") or "",
+                        article.text,
+                        ingested_article_id,
+                    ),
+                )
+
+                if existing_card:
+                    cur.execute(
+                        f"""
+                        update public.feed_cards
+                        set
+                            topic_id = %s,
+                            article_id = %s,
+                            alert_id = %s,
+                            report_id = %s,
+                            source_id = %s,
+                            source_feed_id = %s,
+                            ingested_article_id = %s,
+                            node_id = %s,
+                            comparison_id = %s,
+                            title = %s,
+                            summary = %s,
+                            source = %s,
+                            url = %s,
+                            topic = %s,
+                            card_type = %s,
+                            priority = %s,
+                            priority_score = %s,
+                            personalized_score = %s,
+                            narrative_signal = %s,
+                            evidence_score = %s,
+                            framing = %s,
+                            payload = %s,
+                            recommendations = %s,
+                            explanation = %s,
+                            analysis = %s,
+                            updated_at = now()
+                        where id::text = %s
+                        and coalesce(session_id, %s) = %s
+                        returning {_card_columns()};
+                        """,
+                        (
+                            card["topic_id"],
+                            card["article_id"],
+                            card["alert_id"],
+                            card["report_id"],
+                            card["source_id"],
+                            card["source_feed_id"],
+                            card["ingested_article_id"],
+                            card["node_id"],
+                            card["comparison_id"],
+                            card["title"],
+                            card["summary"],
+                            card["source"],
+                            card["url"],
+                            card["topic"],
+                            card["card_type"],
+                            card["priority"],
+                            card["priority_score"],
+                            card["personalized_score"],
+                            card["narrative_signal"],
+                            card["evidence_score"],
+                            card["framing"],
+                            Json(card["payload"]),
+                            Json(card["recommendations"]),
+                            Json(card["explanation"]),
+                            Json(card["analysis"]),
+                            card["id"],
+                            ANONYMOUS_SESSION_ID,
+                            session_id,
+                        ),
+                    )
+                    updated = cur.fetchone()
+                    if updated:
+                        return _row_to_card(updated)
+
+                cur.execute(
+                    f"""
+                    insert into public.feed_cards (
+                        id, session_id, topic_id, article_id, alert_id, report_id,
+                        source_id, source_feed_id, ingested_article_id, node_id, comparison_id,
+                        title, summary, source, url, topic, card_type, priority,
+                        priority_score, personalized_score, narrative_signal, evidence_score,
+                        framing, payload, recommendations, explanation, analysis, is_read,
+                        is_saved, is_dismissed, created_at, updated_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, now()
+                    )
+                    returning {_card_columns()};
+                    """,
+                    (
+                        card["id"],
+                        card["session_id"],
+                        card["topic_id"],
+                        card["article_id"],
+                        card["alert_id"],
+                        card["report_id"],
+                        card["source_id"],
+                        card["source_feed_id"],
+                        card["ingested_article_id"],
+                        card["node_id"],
+                        card["comparison_id"],
+                        card["title"],
+                        card["summary"],
+                        card["source"],
+                        card["url"],
+                        card["topic"],
+                        card["card_type"],
+                        card["priority"],
+                        card["priority_score"],
+                        card["personalized_score"],
+                        card["narrative_signal"],
+                        card["evidence_score"],
+                        card["framing"],
+                        Json(card["payload"]),
+                        Json(card["recommendations"]),
+                        Json(card["explanation"]),
+                        Json(card["analysis"]),
+                        card["is_read"],
+                        card["is_saved"],
+                        card["is_dismissed"],
+                        card["created_at"],
+                    ),
+                )
+                return _row_to_card(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save ingested article analysis: {exc}") from exc
 
 
 def save_analysis_card(
