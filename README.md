@@ -14,7 +14,7 @@ This deployable MVP includes:
 - source intelligence profiles
 - onboarding setup flow
 - Phase 2 source records, source feeds, RSS sync, and ingested-article feed cards
-- Phase 2 node-based article detail and article-id comparisons
+- Phase 2 node-based article detail, article-id comparisons, and bounded OSINT context
 
 Run locally:
 
@@ -111,9 +111,10 @@ curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
 curl http://localhost:8000/api/v1/sources/<source_id>/articles
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
+curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, and materialized `node_graph`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -158,6 +159,8 @@ Environment:
 - `ANALYZE_DAILY_LIMIT`: maximum analyzed articles per session in the quota window.
 - `ANALYZE_QUOTA_WINDOW_SECONDS`: rolling quota window length.
 - `ANALYZE_COOLDOWN_SECONDS`: minimum wait between analyze requests for the same session.
+- `EXTERNAL_RETRIEVAL_ENABLED`: when true, OSINT can fetch public web search results for bounded context; default is false.
+- `RETRIEVAL_PROVIDER`: labels the retrieval provider used in OSINT payloads.
 
 Database setup:
 
@@ -175,7 +178,8 @@ Phase 2 implementation status:
 - Step 4 complete: feed cards and article detail hydrate from persisted ingested-article analysis, including comparison hooks and node preview.
 - Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison, and persists `article_comparisons`.
 - Step 6 complete: article detail materializes `nodes` and `node_edges`, exposes node perspectives, and supports node-based detail tabs in the frontend.
-- Next steps: bounded OSINT context and default source seeds.
+- Step 7 complete: `GET /api/v1/sources/articles/{article_id}/osint` returns bounded OSINT context and article detail includes `osint_context`.
+- Next step: default source seeds.
 
 Production deploy checklist:
 

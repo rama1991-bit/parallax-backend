@@ -10,6 +10,7 @@ from app.services.feed.store import (
     build_ingested_article_detail,
     create_source_feed_record,
     create_source_record,
+    get_ingested_article_record,
     get_source_record,
     list_ingested_article_records,
     list_source_feed_records,
@@ -17,6 +18,7 @@ from app.services.feed.store import (
     save_ingested_articles,
     update_source_feed_sync_result,
 )
+from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.rss import RSSSyncError, parse_rss_feed
 
 router = APIRouter()
@@ -145,6 +147,25 @@ async def get_ingested_article_nodes(
     if not graph:
         raise HTTPException(status_code=404, detail="Ingested article not found")
     return graph
+
+
+@router.get("/articles/{article_id}/osint")
+async def get_ingested_article_osint(
+    article_id: str,
+    include_external: bool = Query(default=False),
+    limit: int = Query(default=5, ge=1, le=10),
+):
+    try:
+        article = get_ingested_article_record(article_id)
+        if not article:
+            raise HTTPException(status_code=404, detail="Ingested article not found")
+        return await build_article_osint_context(article, include_external=include_external, limit=limit)
+    except HTTPException:
+        raise
+    except OSINTContextError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/{source_id}")

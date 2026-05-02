@@ -333,6 +333,9 @@ def main() -> int:
     assert article_detail_payload["node_graph"]["node_type_counts"]["article"] == 1, article_detail_payload
     assert article_detail_payload["node_graph"]["node_type_counts"]["claim"] >= 1, article_detail_payload
     assert article_detail_payload["node_graph"]["edges"], article_detail_payload
+    assert article_detail_payload["osint_context"]["status"] == "bounded_context_ready", article_detail_payload
+    assert article_detail_payload["osint_context"]["discovered_references"], article_detail_payload
+    assert article_detail_payload["osint_context"]["risks"], article_detail_payload
     article_nodes = _assert_ok(
         client.get(f"/api/v1/sources/articles/{ingested_article_id}/nodes?node_type=author", headers=headers),
         "sources/article-nodes",
@@ -340,6 +343,13 @@ def main() -> int:
     assert article_nodes["selected_node"]["node_type"] == "author", article_nodes
     assert article_nodes["selected_perspective"]["question"], article_nodes
     assert store.NODES and store.NODE_EDGES, article_nodes
+    osint_context = _assert_ok(
+        client.get(f"/api/v1/sources/articles/{ingested_article_id}/osint", headers=headers),
+        "sources/article-osint",
+    ).json()
+    assert osint_context["article_id"] == ingested_article_id, osint_context
+    assert "source_article" in osint_context["source_type"], osint_context
+    assert osint_context["citations"], osint_context
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

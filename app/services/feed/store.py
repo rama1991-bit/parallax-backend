@@ -10,6 +10,7 @@ from psycopg2.extras import Json, RealDictCursor
 from app.core.config import settings
 from app.core.session import ANONYMOUS_SESSION_ID
 from app.services.articles import ExtractedArticle
+from app.services.osint import build_bounded_osint_context
 
 
 class FeedStoreError(Exception):
@@ -3018,6 +3019,7 @@ def build_ingested_article_detail(
         "event_fingerprint": article.get("event_fingerprint") or "",
     }
     node_graph = build_article_node_graph(article_id, session_id=session_id)
+    osint_context = build_bounded_osint_context(article)
 
     nodes_preview = [
         {
@@ -3039,6 +3041,7 @@ def build_ingested_article_detail(
         "feed_card": feed_card,
         "nodes_preview": nodes_preview,
         "node_graph": node_graph,
+        "osint_context": osint_context,
         "comparison_hooks": comparison_hooks,
         "tabs": [
             "Summary",
