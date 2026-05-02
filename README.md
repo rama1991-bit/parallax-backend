@@ -14,7 +14,7 @@ This deployable MVP includes:
 - source intelligence profiles
 - onboarding setup flow
 - Phase 2 source records, source feeds, RSS sync, and ingested-article feed cards
-- Phase 2 node-based article detail, article-id comparisons, and bounded OSINT context
+- Phase 2 node-based article detail, article-id comparisons, bounded OSINT context, and default source seeds
 
 Run locally:
 
@@ -108,13 +108,18 @@ curl -X POST http://localhost:8000/api/v1/sources \
 
 curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
 
+curl http://localhost:8000/api/v1/sources/defaults/preview
+curl -X POST http://localhost:8000/api/v1/sources/defaults/seed
+python scripts/seed_default_sources.py --preview
+python scripts/seed_default_sources.py
+
 curl http://localhost:8000/api/v1/sources/<source_id>/articles
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -179,7 +184,8 @@ Phase 2 implementation status:
 - Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison, and persists `article_comparisons`.
 - Step 6 complete: article detail materializes `nodes` and `node_edges`, exposes node perspectives, and supports node-based detail tabs in the frontend.
 - Step 7 complete: `GET /api/v1/sources/articles/{article_id}/osint` returns bounded OSINT context and article detail includes `osint_context`.
-- Next step: default source seeds.
+- Step 8 complete: `/api/v1/sources/defaults/preview`, `/api/v1/sources/defaults/seed`, and `scripts/seed_default_sources.py` provide an idempotent multilingual default source database.
+- Phase 2 core requirements are now implemented; next work should harden scheduling, auth, deployment, and production data quality.
 
 Production deploy checklist:
 

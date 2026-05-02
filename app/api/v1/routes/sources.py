@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 
 from app.core.session import get_session_id
+from app.services.default_sources import preview_default_sources, seed_default_sources
 from app.services.feed.store import (
     FeedStoreError,
     build_article_node_graph,
@@ -118,6 +119,30 @@ async def create_source(payload: SourceCreate):
         return {"source": refreshed, "feed": feed}
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/defaults/preview")
+async def preview_default_source_database(
+    limit: int | None = Query(default=None, ge=1, le=250),
+):
+    return preview_default_sources(limit=limit)
+
+
+@router.post("/defaults/seed")
+async def seed_default_source_database(
+    limit: int | None = Query(default=None, ge=1, le=250),
+):
+    try:
+        return seed_default_sources(limit=limit)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/seed-defaults")
+async def seed_default_source_database_alias(
+    limit: int | None = Query(default=None, ge=1, le=250),
+):
+    return await seed_default_source_database(limit=limit)
 
 
 @router.get("/articles/{article_id}")

@@ -139,6 +139,20 @@ def main() -> int:
     ).json()
     assert source_sync["rss_feed_count"] == 0, source_sync
 
+    default_preview = _assert_ok(client.get("/api/v1/sources/defaults/preview"), "sources/defaults-preview").json()
+    assert default_preview["summary"]["source_count"] >= 40, default_preview
+    assert default_preview["summary"]["language_count"] >= 8, default_preview
+    assert default_preview["summary"]["rss_count"] >= 20, default_preview
+
+    default_seed = _assert_ok(client.post("/api/v1/sources/defaults/seed"), "sources/defaults-seed").json()
+    assert default_seed["summary"]["seeded_source_count"] == default_preview["summary"]["source_count"], default_seed
+    assert default_seed["summary"]["seeded_feed_count"] == default_preview["summary"]["rss_count"], default_seed
+    default_seed_alias = _assert_ok(
+        client.post("/api/v1/sources/seed-defaults?limit=5"),
+        "sources/defaults-seed-alias",
+    ).json()
+    assert default_seed_alias["summary"]["seeded_source_count"] == 5, default_seed_alias
+
     rss_feed = _assert_ok(
         client.post(
             f"/api/v1/sources/{source['id']}/feeds",
@@ -309,6 +323,7 @@ def main() -> int:
 
     phase2_sources = _assert_ok(client.get("/api/v1/sources"), "sources/list").json()["sources"]
     assert any(item["id"] == source["id"] for item in phase2_sources), phase2_sources
+    assert any(item["is_default"] for item in phase2_sources), phase2_sources
     source_detail = _assert_ok(client.get(f"/api/v1/sources/{source['id']}"), "sources/detail").json()
     assert source_detail["source"]["article_count"] == 1, source_detail
     assert any(feed["feed_type"] == "homepage" for feed in source_detail["feeds"]), source_detail
