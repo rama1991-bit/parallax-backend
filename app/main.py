@@ -1,13 +1,12 @@
 import os
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-from app.core.config import settings
 from app.api.v1.api import api_router
+from app.api.v1.routes.analyze import AnalyzeRequest, analyze_url
+from app.core.config import settings
+from app.services.feed.store import FeedStoreError, list_feed_cards
 
 
 app = FastAPI(
@@ -24,6 +23,13 @@ allowed_origins = [
 if getattr(settings, "FRONTEND_URL", None):
     allowed_origins.append(settings.FRONTEND_URL)
 
+if settings.BACKEND_CORS_ORIGINS:
+    allowed_origins.extend(
+        origin.strip()
+        for origin in settings.BACKEND_CORS_ORIGINS.split(",")
+        if origin.strip()
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(set(allowed_origins)),
@@ -33,29 +39,6 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
-
-
-class AnalyzeRequest(BaseModel):
-    url: str | None = None
-
-
-def mock_analyze_response(url: str | None = None):
-    return {
-        "id": "mock-analyze-card",
-        "title": "New article insight",
-        "summary": "This article contains extracted claims, with a dominant frame of institutional_response.",
-        "source": "External",
-        "url": url or "https://example.com",
-        "topic": "Analysis",
-        "card_type": "article_insight",
-        "priority": 0.8,
-        "narrative_signal": "Narrative signal only — not a truth verdict.",
-        "evidence_score": 0.6,
-        "framing": "institutional_response",
-        "is_read": False,
-        "is_saved": False,
-        "is_dismissed": False,
-    }
 
 
 @app.get("/")
@@ -69,50 +52,22 @@ async def root():
 
 @app.get("/debug/env")
 def debug_env():
-    return {"database_url_exists": bool(os.getenv("DATABASE_URL"))}
+    if settings.ENV == "production" and not settings.DEBUG:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    return {
+        "database_url_exists": bool(os.getenv("DATABASE_URL")),
+        "ai_provider": settings.AI_PROVIDER,
+        "openai_key_exists": bool(settings.OPENAI_API_KEY),
+    }
 
 
 @app.get("/api/feed")
 def get_feed():
-    database_url = os.getenv("DATABASE_URL")
-
-    if not database_url:
-        return {"items": [], "next_cursor": None, "error": "DATABASE_URL is missing"}
-
-    conn = psycopg2.connect(database_url)
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("""
-        select
-            id,
-            title,
-            summary,
-            source,
-            url,
-            topic,
-            card_type,
-            priority,
-            narrative_signal,
-            evidence_score,
-            framing,
-            is_read,
-            is_saved,
-            is_dismissed,
-            created_at
-        from public.feed_cards
-        where is_dismissed = false
-        order by priority desc, created_at desc
-        limit 20;
-    """)
-
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return {
-        "items": rows,
-        "next_cursor": None,
-    }
+    try:
+        return {"items": list_feed_cards(limit=20), "next_cursor": None}
+    except FeedStoreError as exc:
+        return {"items": [], "next_cursor": None, "error": str(exc)}
 
 
 @app.get("/feed")
@@ -120,21 +75,11 @@ def get_feed_alias():
     return get_feed()
 
 
-@app.get("/api/v1/feed")
-def get_feed_v1():
-    return get_feed()
-
-
 @app.post("/analyze")
-def analyze_article(payload: AnalyzeRequest):
-    return mock_analyze_response(payload.url)
+async def analyze_article(payload: AnalyzeRequest):
+    return await analyze_url(payload)
 
 
 @app.post("/api/analyze")
-def analyze_article_api(payload: AnalyzeRequest):
-    return mock_analyze_response(payload.url)
-
-
-@app.post("/api/v1/analyze")
-def analyze_article_v1(payload: AnalyzeRequest):
-    return mock_analyze_response(payload.url)
+async def analyze_article_api(payload: AnalyzeRequest):
+    return await analyze_url(payload)

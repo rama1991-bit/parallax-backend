@@ -1,31 +1,48 @@
-from fastapi import APIRouter, HTTPException, Response
-from uuid import uuid4
+from fastapi import APIRouter, Depends, HTTPException, Response
 import json
 
-from app.services.feed.store import BRIEFS
+from app.core.session import get_session_id
+from app.services.briefs import (
+    BriefTokenError,
+    get_public_brief,
+    list_public_briefs,
+    public_brief_to_markdown,
+)
+from app.services.feed.store import FeedStoreError
 
 router = APIRouter()
 
 
 @router.get("/briefs")
-async def list_briefs():
-    return BRIEFS
+async def list_briefs(session_id: str = Depends(get_session_id)):
+    try:
+        briefs = list_public_briefs(session_id=session_id)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"briefs": briefs}
 
 
 @router.get("/briefs/{token}")
 async def get_brief(token: str):
-    for brief in BRIEFS:
-        if brief["token"] == token:
-            return brief
-    raise HTTPException(status_code=404, detail="Brief not found")
+    try:
+        return get_public_brief(token)
+    except BriefTokenError as exc:
+        raise HTTPException(status_code=404, detail="Brief not found") from exc
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/briefs/{token}/export")
 async def export_brief(token: str, format: str = "json"):
-    for brief in BRIEFS:
-        if brief["token"] == token:
-            if format == "markdown":
-                md = f"# {brief['title']}\n\n{brief.get('brief', {}).get('methodology_note', '')}\n"
-                return Response(md, media_type="text/markdown")
-            return Response(json.dumps(brief, indent=2), media_type="application/json")
-    raise HTTPException(status_code=404, detail="Brief not found")
+    try:
+        brief = get_public_brief(token)
+    except BriefTokenError as exc:
+        raise HTTPException(status_code=404, detail="Brief not found") from exc
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if format == "markdown":
+        return Response(public_brief_to_markdown(brief), media_type="text/markdown")
+
+    return Response(json.dumps(brief, indent=2), media_type="application/json")
