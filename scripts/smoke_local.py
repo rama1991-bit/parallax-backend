@@ -18,6 +18,7 @@ if os.getenv("PARALLAX_SMOKE_USE_CONFIG_DB", "").lower() not in {"1", "true", "y
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.api.v1.routes import sources as sources_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
 from app.services.feed import store  # noqa: E402
@@ -35,6 +36,9 @@ def _reset_memory_store() -> None:
         store.FEED_ITEMS,
         store.ALERTS,
         store.BRIEFS,
+        store.SOURCES,
+        store.SOURCE_FEEDS,
+        store.INGESTED_ARTICLES,
     ):
         collection.clear()
 
@@ -103,6 +107,78 @@ def main() -> int:
         session_id=session_id,
     )
 
+    source_payload = _assert_ok(
+        client.post(
+            "/api/v1/sources",
+            json={
+                "name": "Example Daily",
+                "website_url": "https://example.com",
+                "country": "United States",
+                "language": "English",
+                "region": "North America",
+                "source_size": "medium",
+                "source_type": "newspaper",
+                "credibility_notes": "Smoke-test source, not a real editorial profile.",
+            },
+        ),
+        "sources/create",
+    ).json()
+    source = source_payload["source"]
+    source_feed = source_payload["feed"]
+    assert source["name"] == "Example Daily", source
+    assert source_feed["feed_type"] == "homepage", source_feed
+
+    source_sync = _assert_ok(
+        client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers),
+        "sources/sync-no-rss",
+    ).json()
+    assert source_sync["rss_feed_count"] == 0, source_sync
+
+    rss_feed = _assert_ok(
+        client.post(
+            f"/api/v1/sources/{source['id']}/feeds",
+            json={
+                "feed_url": "https://example.com/rss.xml",
+                "feed_type": "rss",
+                "title": "Example Daily RSS",
+            },
+        ),
+        "sources/feed-create",
+    ).json()["feed"]
+    assert rss_feed["feed_type"] == "rss", rss_feed
+
+    original_parse_rss_feed = sources_route.parse_rss_feed
+
+    async def fake_parse_rss_feed(url: str, limit: int = 20):
+        return {
+            "url": url,
+            "title": "Example Daily RSS",
+            "description": "Fixture feed for local smoke.",
+            "items": [
+                {
+                    "external_id": "source-item-1",
+                    "title": "Regulators publish grid resilience plan",
+                    "summary": "A source item about grid resilience was ingested for Phase 2.",
+                    "url": "https://example.com/grid-resilience-plan",
+                    "published_at": "2026-05-02T10:00:00+00:00",
+                    "raw": {"fixture": True},
+                }
+            ],
+        }
+
+    try:
+        sources_route.parse_rss_feed = fake_parse_rss_feed
+        ingested = _assert_ok(
+            client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers),
+            "sources/sync-rss",
+        ).json()
+    finally:
+        sources_route.parse_rss_feed = original_parse_rss_feed
+
+    assert len(ingested["articles"]) == 1, ingested
+    assert len(ingested["cards"]) == 1, ingested
+    ingested_article_id = ingested["articles"][0]["id"]
+
     article = ExtractedArticle(
         url="https://example.com/analysis",
         final_url="https://example.com/analysis",
@@ -135,10 +211,11 @@ def main() -> int:
     store.update_report_saved(card["report_id"], session_id=session_id, is_saved=True)
 
     feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
-    assert len(feed["cards"]) >= 4, feed
+    assert len(feed["cards"]) >= 5, feed
+    assert any(item["card_type"] == "ingested_article" for item in feed["cards"]), feed
 
     alerts = _assert_ok(client.get("/api/v1/alerts", headers=headers), "alerts").json()
-    assert alerts["unread_count"] >= 3, alerts
+    assert alerts["unread_count"] >= 4, alerts
     first_alert = alerts["alerts"][0]
     _assert_ok(client.post(f"/api/v1/alerts/{first_alert['id']}/read", headers=headers), "alert/read")
     _assert_ok(client.post("/api/v1/alerts/read-all", headers=headers), "alerts/read-all")
@@ -156,6 +233,23 @@ def main() -> int:
         "authors/session-isolation",
     ).json()["sources"]
     assert other_sources == [], other_sources
+
+    phase2_sources = _assert_ok(client.get("/api/v1/sources"), "sources/list").json()["sources"]
+    assert any(item["id"] == source["id"] for item in phase2_sources), phase2_sources
+    source_detail = _assert_ok(client.get(f"/api/v1/sources/{source['id']}"), "sources/detail").json()
+    assert source_detail["source"]["article_count"] == 1, source_detail
+    assert any(feed["feed_type"] == "homepage" for feed in source_detail["feeds"]), source_detail
+    assert any(feed["feed_type"] == "rss" for feed in source_detail["feeds"]), source_detail
+    source_articles = _assert_ok(
+        client.get(f"/api/v1/sources/{source['id']}/articles"),
+        "sources/articles",
+    ).json()["articles"]
+    assert source_articles and source_articles[0]["id"] == ingested_article_id, source_articles
+    article_detail = _assert_ok(
+        client.get(f"/api/v1/sources/articles/{ingested_article_id}"),
+        "sources/article-detail",
+    ).json()["article"]
+    assert article_detail["event_fingerprint"], article_detail
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

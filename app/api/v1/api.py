@@ -14,6 +14,7 @@ from app.api.v1.routes import (
     onboarding,
     saved_reports,
     compare,
+    sources,
 )
 
 api_router = APIRouter()
@@ -31,3 +32,4 @@ api_router.include_router(topics.router, prefix="/topics", tags=["topics"])
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(briefs.router, prefix="/public", tags=["public"])
 api_router.include_router(authors.router, prefix="/authors", tags=["authors"])
+api_router.include_router(sources.router, prefix="/sources", tags=["sources"])

@@ -1,4 +1,7 @@
+import hashlib
+import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import psycopg2
@@ -28,6 +31,9 @@ FEED_ITEMS = []
 ALERTS = []
 BRIEFS = []
 AUTHORS = []
+SOURCES = []
+SOURCE_FEEDS = []
+INGESTED_ARTICLES = []
 
 _SCHEMA_READY = False
 _HIGH_PRIORITY_ALERT_THRESHOLD = 0.75
@@ -38,7 +44,20 @@ _ALERT_CARD_TYPES = (
     "divergence_increase",
     "topic_monitor",
     "feed_item",
+    "ingested_article",
 )
+_SOURCE_SIZES = {"major", "medium", "small", "niche"}
+_SOURCE_TYPES = {
+    "news_agency",
+    "newspaper",
+    "broadcaster",
+    "magazine",
+    "independent",
+    "state_media",
+    "NGO",
+    "official",
+}
+_SOURCE_FEED_TYPES = {"rss", "homepage", "manual"}
 
 
 def now_iso():
@@ -768,6 +787,11 @@ def _row_to_card(row: dict) -> dict:
         "article_id": str(row.get("article_id")) if row.get("article_id") else None,
         "alert_id": row.get("alert_id"),
         "report_id": str(row.get("report_id")) if row.get("report_id") else None,
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "ingested_article_id": str(row.get("ingested_article_id")) if row.get("ingested_article_id") else None,
+        "node_id": str(row.get("node_id")) if row.get("node_id") else None,
+        "comparison_id": str(row.get("comparison_id")) if row.get("comparison_id") else None,
         "card_type": row.get("card_type") or "article_insight",
         "title": row.get("title") or "Untitled analysis",
         "summary": row.get("summary") or "",
@@ -799,6 +823,11 @@ def _card_columns() -> str:
         article_id,
         alert_id,
         report_id,
+        source_id,
+        source_feed_id,
+        ingested_article_id,
+        node_id,
+        comparison_id,
         title,
         summary,
         source,
@@ -1170,6 +1199,971 @@ def _row_to_feed_item(row: dict) -> dict:
         "raw": row.get("raw") or {},
         "created_at": _row_created_at(row),
     }
+
+
+def _clean_text(value, limit: int, default: str | None = None) -> str | None:
+    if value is None:
+        return default
+    cleaned = " ".join(str(value).strip().split())
+    if not cleaned:
+        return default
+    return cleaned[:limit]
+
+
+def _clean_url(value) -> str | None:
+    cleaned = _clean_text(value, 1000)
+    return cleaned
+
+
+def _domain_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        domain = urlparse(url).netloc.lower().removeprefix("www.")
+        return domain or None
+    except ValueError:
+        return None
+
+
+def _source_name_from_inputs(name: str | None, website_url: str | None, rss_url: str | None) -> str:
+    clean_name = _clean_text(name, 180)
+    if clean_name:
+        return clean_name
+    domain = _domain_from_url(website_url) or _domain_from_url(rss_url)
+    return domain or "Manual source"
+
+
+def _normalize_source_size(value: str | None) -> str:
+    clean = _clean_text(value, 20)
+    return clean if clean in _SOURCE_SIZES else "medium"
+
+
+def _normalize_source_type(value: str | None) -> str:
+    clean = _clean_text(value, 40)
+    if clean and clean.lower() == "ngo":
+        return "NGO"
+    return clean if clean in _SOURCE_TYPES else "newspaper"
+
+
+def _normalize_source_feed_type(value: str | None) -> str:
+    clean = _clean_text(value, 30)
+    return clean if clean in _SOURCE_FEED_TYPES else "rss"
+
+
+def _row_to_source_record(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "name": row.get("name") or "Untitled source",
+        "website_url": row.get("website_url"),
+        "rss_url": row.get("rss_url"),
+        "country": row.get("country"),
+        "language": row.get("language"),
+        "region": row.get("region"),
+        "political_context": row.get("political_context"),
+        "source_size": row.get("source_size") or "medium",
+        "source_type": row.get("source_type") or "newspaper",
+        "credibility_notes": row.get("credibility_notes"),
+        "notes": row.get("notes"),
+        "is_default": bool(row.get("is_default")),
+        "feed_count": int(row.get("feed_count") or 0),
+        "article_count": int(row.get("article_count") or 0),
+        "created_at": _row_created_at(row),
+        "updated_at": _row_created_at({"created_at": row.get("updated_at") or row.get("created_at")}),
+    }
+
+
+def _row_to_source_feed_record(row: dict) -> dict:
+    last_checked_at = row.get("last_checked_at")
+    last_success_at = row.get("last_success_at")
+    if isinstance(last_checked_at, datetime):
+        last_checked_at = last_checked_at.isoformat()
+    if isinstance(last_success_at, datetime):
+        last_success_at = last_success_at.isoformat()
+
+    return {
+        "id": str(row.get("id")),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "feed_url": row.get("feed_url"),
+        "feed_type": row.get("feed_type") or "rss",
+        "title": row.get("title"),
+        "language": row.get("language"),
+        "country": row.get("country"),
+        "status": row.get("status") or "active",
+        "fetch_interval_minutes": int(row.get("fetch_interval_minutes") or 60),
+        "last_checked_at": last_checked_at,
+        "last_success_at": last_success_at,
+        "last_error": row.get("last_error"),
+        "created_at": _row_created_at(row),
+        "updated_at": _row_created_at({"created_at": row.get("updated_at") or row.get("created_at")}),
+    }
+
+
+def _row_to_ingested_article_record(row: dict) -> dict:
+    published_at = row.get("published_at")
+    if isinstance(published_at, datetime):
+        published_at = published_at.isoformat()
+
+    article = {
+        "id": str(row.get("id")),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "feed_item_id": str(row.get("feed_item_id")) if row.get("feed_item_id") else None,
+        "article_analysis_id": str(row.get("article_analysis_id")) if row.get("article_analysis_id") else None,
+        "url": row.get("url"),
+        "canonical_url": row.get("canonical_url"),
+        "title": row.get("title") or "Untitled article",
+        "author": row.get("author"),
+        "published_at": published_at,
+        "language": row.get("language"),
+        "country": row.get("country"),
+        "summary": row.get("summary") or "",
+        "extracted_text": row.get("extracted_text"),
+        "content_hash": row.get("content_hash"),
+        "event_fingerprint": row.get("event_fingerprint"),
+        "comparison_keywords": row.get("comparison_keywords") or [],
+        "raw_metadata": row.get("raw_metadata") or {},
+        "ingestion_status": row.get("ingestion_status") or "pending",
+        "analysis_status": row.get("analysis_status") or "pending",
+        "created_at": _row_created_at(row),
+        "updated_at": _row_created_at({"created_at": row.get("updated_at") or row.get("created_at")}),
+    }
+
+    if row.get("source_name"):
+        article["source"] = {
+            "id": str(row.get("source_id")) if row.get("source_id") else None,
+            "name": row.get("source_name"),
+            "website_url": row.get("source_website_url"),
+            "country": row.get("source_country"),
+            "language": row.get("source_language"),
+            "source_size": row.get("source_size"),
+            "source_type": row.get("source_type"),
+        }
+    if row.get("feed_url"):
+        article["source_feed"] = {
+            "id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+            "feed_url": row.get("feed_url"),
+            "feed_type": row.get("feed_type"),
+            "title": row.get("feed_title"),
+        }
+
+    return article
+
+
+def _source_counts(source_id: str) -> tuple[int, int]:
+    feed_count = len([feed for feed in SOURCE_FEEDS if feed.get("source_id") == source_id])
+    article_count = len([article for article in INGESTED_ARTICLES if article.get("source_id") == source_id])
+    return feed_count, article_count
+
+
+def _source_with_memory_counts(source: dict) -> dict:
+    feed_count, article_count = _source_counts(source["id"])
+    enriched = {**source}
+    enriched["feed_count"] = feed_count
+    enriched["article_count"] = article_count
+    return enriched
+
+
+def _find_memory_source(website_url: str | None = None, rss_url: str | None = None) -> dict | None:
+    for source in SOURCES:
+        if website_url and source.get("website_url") == website_url:
+            return _source_with_memory_counts(source)
+        if rss_url and source.get("rss_url") == rss_url:
+            return _source_with_memory_counts(source)
+    return None
+
+
+def create_source_record(
+    name: str | None = None,
+    website_url: str | None = None,
+    rss_url: str | None = None,
+    country: str | None = None,
+    language: str | None = None,
+    region: str | None = None,
+    political_context: str | None = None,
+    source_size: str | None = None,
+    source_type: str | None = None,
+    credibility_notes: str | None = None,
+    notes: str | None = None,
+    is_default: bool = False,
+) -> dict:
+    clean_website_url = _clean_url(website_url)
+    clean_rss_url = _clean_url(rss_url)
+    clean_source = {
+        "name": _source_name_from_inputs(name, clean_website_url, clean_rss_url),
+        "website_url": clean_website_url,
+        "rss_url": clean_rss_url,
+        "country": _clean_text(country, 80),
+        "language": _clean_text(language, 80),
+        "region": _clean_text(region, 80),
+        "political_context": _clean_text(political_context, 1000),
+        "source_size": _normalize_source_size(source_size),
+        "source_type": _normalize_source_type(source_type),
+        "credibility_notes": _clean_text(credibility_notes, 1000),
+        "notes": _clean_text(notes, 1000),
+        "is_default": bool(is_default),
+    }
+
+    if not database_enabled():
+        existing = _find_memory_source(clean_website_url, clean_rss_url)
+        if existing:
+            return existing
+        now = now_iso()
+        source = {
+            "id": str(uuid4()),
+            **clean_source,
+            "feed_count": 0,
+            "article_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        SOURCES.insert(0, source)
+        return source
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select
+                        s.*,
+                        count(distinct sf.id) as feed_count,
+                        count(distinct ia.id) as article_count
+                    from public.sources s
+                    left join public.source_feeds sf on sf.source_id = s.id
+                    left join public.ingested_articles ia on ia.source_id = s.id
+                    where (%s is not null and s.website_url = %s)
+                    or (%s is not null and s.rss_url = %s)
+                    group by s.id
+                    limit 1;
+                    """,
+                    (clean_website_url, clean_website_url, clean_rss_url, clean_rss_url),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _row_to_source_record(row)
+
+                source_id = str(uuid4())
+                cur.execute(
+                    """
+                    insert into public.sources (
+                        id, name, website_url, rss_url, country, language, region,
+                        political_context, source_size, source_type, credibility_notes,
+                        notes, is_default, created_at, updated_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
+                    )
+                    returning *, 0 as feed_count, 0 as article_count;
+                    """,
+                    (
+                        source_id,
+                        clean_source["name"],
+                        clean_source["website_url"],
+                        clean_source["rss_url"],
+                        clean_source["country"],
+                        clean_source["language"],
+                        clean_source["region"],
+                        clean_source["political_context"],
+                        clean_source["source_size"],
+                        clean_source["source_type"],
+                        clean_source["credibility_notes"],
+                        clean_source["notes"],
+                        clean_source["is_default"],
+                    ),
+                )
+                return _row_to_source_record(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not create source: {exc}") from exc
+
+
+def list_source_records(
+    limit: int = 100,
+    country: str | None = None,
+    language: str | None = None,
+    source_size: str | None = None,
+    source_type: str | None = None,
+) -> list[dict]:
+    limit = max(1, min(limit, 250))
+    clean_country = _clean_text(country, 80)
+    clean_language = _clean_text(language, 80)
+    clean_size = _clean_text(source_size, 20)
+    clean_type = _clean_text(source_type, 40)
+
+    def matches(source: dict) -> bool:
+        return (
+            (not clean_country or source.get("country") == clean_country)
+            and (not clean_language or source.get("language") == clean_language)
+            and (not clean_size or source.get("source_size") == clean_size)
+            and (not clean_type or source.get("source_type") == clean_type)
+        )
+
+    if not database_enabled():
+        sources = [_source_with_memory_counts(source) for source in SOURCES if matches(source)]
+        return sorted(sources, key=lambda item: (not item.get("is_default"), item.get("name", "")))[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_country:
+        where.append("s.country = %s")
+        params.append(clean_country)
+    if clean_language:
+        where.append("s.language = %s")
+        params.append(clean_language)
+    if clean_size:
+        where.append("s.source_size = %s")
+        params.append(clean_size)
+    if clean_type:
+        where.append("s.source_type = %s")
+        params.append(clean_type)
+
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select
+                        s.*,
+                        count(distinct sf.id) as feed_count,
+                        count(distinct ia.id) as article_count
+                    from public.sources s
+                    left join public.source_feeds sf on sf.source_id = s.id
+                    left join public.ingested_articles ia on ia.source_id = s.id
+                    {where_sql}
+                    group by s.id
+                    order by s.is_default desc, s.name asc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_record(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list sources: {exc}") from exc
+
+
+def get_source_record(source_id: str) -> dict | None:
+    if not database_enabled():
+        for source in SOURCES:
+            if source.get("id") == source_id:
+                return _source_with_memory_counts(source)
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select
+                        s.*,
+                        count(distinct sf.id) as feed_count,
+                        count(distinct ia.id) as article_count
+                    from public.sources s
+                    left join public.source_feeds sf on sf.source_id = s.id
+                    left join public.ingested_articles ia on ia.source_id = s.id
+                    where s.id::text = %s
+                    group by s.id
+                    limit 1;
+                    """,
+                    (source_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_source_record(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load source: {exc}") from exc
+
+
+def create_source_feed_record(
+    source_id: str,
+    feed_url: str,
+    feed_type: str = "rss",
+    title: str | None = None,
+    language: str | None = None,
+    country: str | None = None,
+    status: str = "active",
+    fetch_interval_minutes: int = 60,
+) -> dict:
+    clean_url = _clean_url(feed_url)
+    if not clean_url:
+        raise FeedStoreError("Source feed URL is required.")
+    clean_type = _normalize_source_feed_type(feed_type)
+    clean_title = _clean_text(title, 180)
+    clean_language = _clean_text(language, 80)
+    clean_country = _clean_text(country, 80)
+    clean_status = _clean_text(status, 40) or "active"
+    interval = max(15, min(int(fetch_interval_minutes or 60), 1440))
+
+    if not database_enabled():
+        if not get_source_record(source_id):
+            raise FeedStoreError("Source not found.")
+        for feed in SOURCE_FEEDS:
+            if feed.get("source_id") == source_id and feed.get("feed_url") == clean_url:
+                feed.update(
+                    {
+                        "feed_type": clean_type,
+                        "title": clean_title or feed.get("title"),
+                        "language": clean_language or feed.get("language"),
+                        "country": clean_country or feed.get("country"),
+                        "status": clean_status,
+                        "fetch_interval_minutes": interval,
+                        "updated_at": now_iso(),
+                    }
+                )
+                return feed
+        now = now_iso()
+        feed = {
+            "id": str(uuid4()),
+            "source_id": source_id,
+            "feed_url": clean_url,
+            "feed_type": clean_type,
+            "title": clean_title,
+            "language": clean_language,
+            "country": clean_country,
+            "status": clean_status,
+            "fetch_interval_minutes": interval,
+            "last_checked_at": None,
+            "last_success_at": None,
+            "last_error": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        SOURCE_FEEDS.insert(0, feed)
+        return feed
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("select 1 from public.sources where id::text = %s limit 1;", (source_id,))
+                if not cur.fetchone():
+                    raise FeedStoreError("Source not found.")
+                cur.execute(
+                    """
+                    insert into public.source_feeds (
+                        id, source_id, feed_url, feed_type, title, language, country,
+                        status, fetch_interval_minutes, created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                    on conflict (source_id, feed_url) do update set
+                        feed_type = excluded.feed_type,
+                        title = coalesce(excluded.title, public.source_feeds.title),
+                        language = coalesce(excluded.language, public.source_feeds.language),
+                        country = coalesce(excluded.country, public.source_feeds.country),
+                        status = excluded.status,
+                        fetch_interval_minutes = excluded.fetch_interval_minutes,
+                        updated_at = now()
+                    returning *;
+                    """,
+                    (
+                        str(uuid4()),
+                        source_id,
+                        clean_url,
+                        clean_type,
+                        clean_title,
+                        clean_language,
+                        clean_country,
+                        clean_status,
+                        interval,
+                    ),
+                )
+                return _row_to_source_feed_record(cur.fetchone())
+    except FeedStoreError:
+        raise
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not create source feed: {exc}") from exc
+
+
+def list_source_feed_records(
+    source_id: str | None = None,
+    feed_type: str | None = None,
+    status: str | None = None,
+) -> list[dict]:
+    clean_type = _clean_text(feed_type, 30)
+    clean_status = _clean_text(status, 40)
+
+    def matches(feed: dict) -> bool:
+        return (
+            (not source_id or feed.get("source_id") == source_id)
+            and (not clean_type or feed.get("feed_type") == clean_type)
+            and (not clean_status or feed.get("status") == clean_status)
+        )
+
+    if not database_enabled():
+        feeds = [feed for feed in SOURCE_FEEDS if matches(feed)]
+        return sorted(feeds, key=lambda item: item.get("created_at", ""), reverse=True)
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if source_id:
+        where.append("source_id::text = %s")
+        params.append(source_id)
+    if clean_type:
+        where.append("feed_type = %s")
+        params.append(clean_type)
+    if clean_status:
+        where.append("status = %s")
+        params.append(clean_status)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_feeds
+                    {where_sql}
+                    order by created_at desc;
+                    """,
+                    tuple(params),
+                )
+                return [_row_to_source_feed_record(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source feeds: {exc}") from exc
+
+
+def update_source_feed_sync_result(
+    source_feed_id: str,
+    success: bool,
+    title: str | None = None,
+    error: str | None = None,
+) -> dict | None:
+    clean_title = _clean_text(title, 180)
+    clean_error = _clean_text(error, 1000)
+    checked_at = now_iso()
+
+    if not database_enabled():
+        for feed in SOURCE_FEEDS:
+            if feed.get("id") != source_feed_id:
+                continue
+            feed["last_checked_at"] = checked_at
+            feed["updated_at"] = checked_at
+            if clean_title:
+                feed["title"] = clean_title
+            if success:
+                feed["last_success_at"] = checked_at
+                feed["last_error"] = None
+            else:
+                feed["last_error"] = clean_error or "Sync failed."
+            return feed
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    update public.source_feeds
+                    set
+                        title = coalesce(%s, title),
+                        last_checked_at = now(),
+                        last_success_at = case when %s then now() else last_success_at end,
+                        last_error = case when %s then null else %s end,
+                        updated_at = now()
+                    where id::text = %s
+                    returning *;
+                    """,
+                    (clean_title, success, success, clean_error or "Sync failed.", source_feed_id),
+                )
+                row = cur.fetchone()
+                return _row_to_source_feed_record(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not update source feed sync state: {exc}") from exc
+
+
+def _article_keyword_tokens(*values: str | None) -> list[str]:
+    stopwords = {
+        "about",
+        "after",
+        "again",
+        "against",
+        "being",
+        "from",
+        "have",
+        "into",
+        "over",
+        "said",
+        "says",
+        "that",
+        "their",
+        "there",
+        "this",
+        "with",
+        "will",
+        "would",
+    }
+    seen = set()
+    tokens = []
+    text = " ".join(value or "" for value in values)
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]{2,}", text.lower()):
+        if token in stopwords or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token[:40])
+        if len(tokens) >= 16:
+            break
+    return tokens
+
+
+def _article_content_hash(raw_item: dict) -> str:
+    content = "|".join(
+        [
+            str(raw_item.get("url") or ""),
+            str(raw_item.get("title") or ""),
+            str(raw_item.get("summary") or ""),
+            str(raw_item.get("published_at") or ""),
+        ]
+    )
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _article_event_fingerprint(raw_item: dict) -> str:
+    tokens = _article_keyword_tokens(raw_item.get("title"), raw_item.get("summary"))
+    if not tokens:
+        tokens = _article_keyword_tokens(raw_item.get("url"))
+    basis = " ".join(tokens[:12]) or str(raw_item.get("url") or uuid4())
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_ingested_article_card(
+    source: dict,
+    source_feed: dict | None,
+    article: dict,
+    session_id: str = ANONYMOUS_SESSION_ID,
+) -> dict:
+    source_name = source.get("name") or "Unknown source"
+    summary = article.get("summary") or "A configured source published a new article."
+    return {
+        "id": str(uuid4()),
+        "session_id": session_id,
+        "topic_id": None,
+        "article_id": None,
+        "alert_id": None,
+        "report_id": None,
+        "source_id": article.get("source_id") or source.get("id"),
+        "source_feed_id": article.get("source_feed_id") or (source_feed or {}).get("id"),
+        "ingested_article_id": article.get("id"),
+        "node_id": None,
+        "comparison_id": None,
+        "card_type": "ingested_article",
+        "title": article.get("title") or "New ingested article",
+        "summary": summary,
+        "source": source_name,
+        "url": article.get("url"),
+        "topic": source.get("country") or source.get("language") or "Source ingestion",
+        "priority": 0.52,
+        "priority_score": 0.52,
+        "personalized_score": 0.52,
+        "narrative_signal": "Source ingestion signal only. Analyze and compare before drawing conclusions.",
+        "evidence_score": None,
+        "framing": None,
+        "payload": {
+            "source_id": source.get("id"),
+            "source_name": source_name,
+            "source_type": source.get("source_type"),
+            "source_size": source.get("source_size"),
+            "source_country": source.get("country"),
+            "source_language": source.get("language"),
+            "source_feed_id": (source_feed or {}).get("id"),
+            "source_feed_type": (source_feed or {}).get("feed_type"),
+            "feed_url": (source_feed or {}).get("feed_url"),
+            "ingested_article_id": article.get("id"),
+            "published_at": article.get("published_at"),
+            "event_fingerprint": article.get("event_fingerprint"),
+            "comparison_keywords": article.get("comparison_keywords") or [],
+            "analysis_status": article.get("analysis_status"),
+        },
+        "recommendations": [
+            {
+                "type": "open_source",
+                "label": "Open source article",
+                "href": article.get("url"),
+                "reason": "Inspect the original publication before analysis.",
+            },
+            {
+                "type": "compare",
+                "label": "Compare story",
+                "href": f"/compare?articleId={article.get('id')}",
+                "reason": "Look for similar coverage from other sources.",
+            },
+        ],
+        "explanation": {
+            "why_this_matters": "A saved source published a new article that can now be analyzed or compared.",
+            "what_changed": {
+                "source": source_name,
+                "feed_type": (source_feed or {}).get("feed_type"),
+                "article_url": article.get("url"),
+            },
+            "recommended_action": "Analyze the article or compare it across sources before treating it as evidence.",
+        },
+        "analysis": {},
+        "is_read": False,
+        "is_saved": False,
+        "is_dismissed": False,
+        "created_at": now_iso(),
+    }
+
+
+def save_ingested_articles(
+    source: dict,
+    source_feed: dict | None,
+    items: list[dict],
+    session_id: str = ANONYMOUS_SESSION_ID,
+    card_limit: int = 10,
+) -> dict:
+    new_articles = []
+    new_cards = []
+    source_id = source.get("id")
+    source_feed_id = (source_feed or {}).get("id")
+    card_limit = max(0, min(card_limit, 50))
+
+    if not source_id:
+        raise FeedStoreError("Source id is required for ingestion.")
+
+    if not database_enabled():
+        existing_urls = {
+            article.get("url")
+            for article in INGESTED_ARTICLES
+            if article.get("source_id") == source_id and article.get("url")
+        }
+        for raw_item in items:
+            url = _clean_url(raw_item.get("url"))
+            if not url or url in existing_urls:
+                continue
+            now = now_iso()
+            article = {
+                "id": str(uuid4()),
+                "source_id": source_id,
+                "source_feed_id": source_feed_id,
+                "feed_item_id": None,
+                "article_analysis_id": None,
+                "url": url,
+                "canonical_url": _clean_url(raw_item.get("canonical_url")) or url,
+                "title": _clean_text(raw_item.get("title"), 300, "Untitled article"),
+                "author": _clean_text(raw_item.get("author"), 200),
+                "published_at": raw_item.get("published_at"),
+                "language": raw_item.get("language") or source.get("language"),
+                "country": raw_item.get("country") or source.get("country"),
+                "summary": _clean_text(raw_item.get("summary"), 2000, ""),
+                "extracted_text": None,
+                "content_hash": _article_content_hash(raw_item),
+                "event_fingerprint": _article_event_fingerprint(raw_item),
+                "comparison_keywords": _article_keyword_tokens(raw_item.get("title"), raw_item.get("summary")),
+                "raw_metadata": raw_item.get("raw") or {},
+                "ingestion_status": "fetched",
+                "analysis_status": "pending",
+                "created_at": now,
+                "updated_at": now,
+            }
+            INGESTED_ARTICLES.insert(0, article)
+            existing_urls.add(url)
+            new_articles.append(article)
+            if len(new_cards) < card_limit:
+                card = _build_ingested_article_card(source, source_feed, article, session_id=session_id)
+                FEED_CARDS.insert(0, card)
+                new_cards.append(card)
+        return {"articles": new_articles, "cards": new_cards}
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for raw_item in items:
+                    url = _clean_url(raw_item.get("url"))
+                    if not url:
+                        continue
+                    comparison_keywords = _article_keyword_tokens(raw_item.get("title"), raw_item.get("summary"))
+                    cur.execute(
+                        """
+                        insert into public.ingested_articles (
+                            id, source_id, source_feed_id, feed_item_id, article_analysis_id,
+                            url, canonical_url, title, author, published_at, language, country,
+                            summary, extracted_text, content_hash, event_fingerprint,
+                            comparison_keywords, raw_metadata, ingestion_status, analysis_status,
+                            created_at, updated_at
+                        )
+                        values (
+                            %s, %s, %s, null, null, %s, %s, %s, %s, %s, %s, %s,
+                            %s, null, %s, %s, %s, %s, 'fetched', 'pending', now(), now()
+                        )
+                        on conflict (source_id, url) do nothing
+                        returning
+                            id, source_id, source_feed_id, feed_item_id, article_analysis_id,
+                            url, canonical_url, title, author, published_at, language, country,
+                            summary, extracted_text, content_hash, event_fingerprint,
+                            comparison_keywords, raw_metadata, ingestion_status, analysis_status,
+                            created_at, updated_at;
+                        """,
+                        (
+                            str(uuid4()),
+                            source_id,
+                            source_feed_id,
+                            url,
+                            _clean_url(raw_item.get("canonical_url")) or url,
+                            _clean_text(raw_item.get("title"), 300, "Untitled article"),
+                            _clean_text(raw_item.get("author"), 200),
+                            raw_item.get("published_at"),
+                            raw_item.get("language") or source.get("language"),
+                            raw_item.get("country") or source.get("country"),
+                            _clean_text(raw_item.get("summary"), 2000, ""),
+                            _article_content_hash(raw_item),
+                            _article_event_fingerprint(raw_item),
+                            Json(comparison_keywords),
+                            Json(raw_item.get("raw") or {}),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        continue
+                    article = _row_to_ingested_article_record(row)
+                    new_articles.append(article)
+
+                    if len(new_cards) < card_limit:
+                        card = _build_ingested_article_card(source, source_feed, article, session_id=session_id)
+                        cur.execute(
+                            f"""
+                            insert into public.feed_cards (
+                                id, session_id, topic_id, article_id, alert_id, report_id,
+                                source_id, source_feed_id, ingested_article_id, node_id, comparison_id,
+                                title, summary, source, url, topic, card_type, priority,
+                                priority_score, personalized_score, narrative_signal, evidence_score,
+                                framing, payload, recommendations, explanation, analysis, is_read,
+                                is_saved, is_dismissed, created_at, updated_at
+                            )
+                            values (
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, now()
+                            )
+                            returning {_card_columns()};
+                            """,
+                            (
+                                card["id"],
+                                card["session_id"],
+                                card["topic_id"],
+                                card["article_id"],
+                                card["alert_id"],
+                                card["report_id"],
+                                card["source_id"],
+                                card["source_feed_id"],
+                                card["ingested_article_id"],
+                                card["node_id"],
+                                card["comparison_id"],
+                                card["title"],
+                                card["summary"],
+                                card["source"],
+                                card["url"],
+                                card["topic"],
+                                card["card_type"],
+                                card["priority"],
+                                card["priority_score"],
+                                card["personalized_score"],
+                                card["narrative_signal"],
+                                card["evidence_score"],
+                                card["framing"],
+                                Json(card["payload"]),
+                                Json(card["recommendations"]),
+                                Json(card["explanation"]),
+                                Json(card["analysis"]),
+                                card["is_read"],
+                                card["is_saved"],
+                                card["is_dismissed"],
+                                card["created_at"],
+                            ),
+                        )
+                        new_cards.append(_row_to_card(cur.fetchone()))
+        return {"articles": new_articles, "cards": new_cards}
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save ingested articles: {exc}") from exc
+
+
+def list_ingested_article_records(source_id: str | None = None, limit: int = 100) -> list[dict]:
+    limit = max(1, min(limit, 250))
+
+    if not database_enabled():
+        articles = [
+            article
+            for article in INGESTED_ARTICLES
+            if not source_id or article.get("source_id") == source_id
+        ]
+        return sorted(
+            articles,
+            key=lambda item: item.get("published_at") or item.get("created_at", ""),
+            reverse=True,
+        )[:limit]
+
+    _ensure_schema()
+    where_sql = "where ia.source_id::text = %s" if source_id else ""
+    params: tuple[object, ...] = (source_id, limit) if source_id else (limit,)
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select
+                        ia.*,
+                        s.name as source_name,
+                        s.website_url as source_website_url,
+                        s.country as source_country,
+                        s.language as source_language,
+                        s.source_size,
+                        s.source_type,
+                        sf.feed_url,
+                        sf.feed_type,
+                        sf.title as feed_title
+                    from public.ingested_articles ia
+                    left join public.sources s on s.id = ia.source_id
+                    left join public.source_feeds sf on sf.id = ia.source_feed_id
+                    {where_sql}
+                    order by coalesce(ia.published_at, ia.created_at) desc
+                    limit %s;
+                    """,
+                    params,
+                )
+                return [_row_to_ingested_article_record(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list ingested articles: {exc}") from exc
+
+
+def get_ingested_article_record(article_id: str) -> dict | None:
+    if not database_enabled():
+        for article in INGESTED_ARTICLES:
+            if article.get("id") == article_id:
+                return article
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select
+                        ia.*,
+                        s.name as source_name,
+                        s.website_url as source_website_url,
+                        s.country as source_country,
+                        s.language as source_language,
+                        s.source_size,
+                        s.source_type,
+                        sf.feed_url,
+                        sf.feed_type,
+                        sf.title as feed_title
+                    from public.ingested_articles ia
+                    left join public.sources s on s.id = ia.source_id
+                    left join public.source_feeds sf on sf.id = ia.source_feed_id
+                    where ia.id::text = %s
+                    limit 1;
+                    """,
+                    (article_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_ingested_article_record(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load ingested article: {exc}") from exc
 
 
 def create_feed_subscription(
@@ -1654,7 +2648,7 @@ def _filtered_in_memory(filter_type: str, session_id: str) -> list[dict]:
             }
         ]
     if filter_type == "articles":
-        return [card for card in cards if card.get("card_type") == "article_insight"]
+        return [card for card in cards if card.get("card_type") in {"article_insight", "ingested_article"}]
     if filter_type == "saved":
         return [card for card in cards if card.get("is_saved")]
     return cards
@@ -1685,7 +2679,7 @@ def list_feed_cards(
             "'source_ecosystem_change', 'divergence_increase')"
         )
     elif filter_type == "articles":
-        where.append("card_type = 'article_insight'")
+        where.append("card_type in ('article_insight', 'ingested_article')")
     elif filter_type == "saved":
         where.append("is_saved = true")
 
@@ -1735,6 +2729,8 @@ def _alert_kind(card: dict) -> str:
         return "topic"
     if card_type == "feed_item":
         return "feed"
+    if card_type == "ingested_article":
+        return "source"
     if card_type == "article_insight":
         return "analysis"
     if card_type in {

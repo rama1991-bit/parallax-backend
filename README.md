@@ -13,7 +13,8 @@ This deployable MVP includes:
 - public briefs with signed share tokens
 - source intelligence profiles
 - onboarding setup flow
-- Phase 2 schema foundation for sources, ingested articles, nodes, and comparisons
+- Phase 2 source records, source feeds, RSS sync, and ingested-article feed cards
+- Phase 2 schema foundation for nodes and comparisons
 
 Run locally:
 
@@ -92,6 +93,20 @@ curl -X POST http://localhost:8000/api/v1/feeds/<feed_id>/sync
 
 Feed sync parses RSS/Atom items, stores new items, and creates lightweight `feed_item` cards for the smart feed.
 
+Phase 2 source ingestion flow:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/sources \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"Example Daily\",\"website_url\":\"https://example.com\",\"rss_url\":\"https://example.com/rss.xml\",\"country\":\"United States\",\"language\":\"English\",\"source_size\":\"medium\",\"source_type\":\"newspaper\"}"
+
+curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
+
+curl http://localhost:8000/api/v1/sources/<source_id>/articles
+```
+
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+
 Onboarding flow:
 
 ```bash
@@ -147,7 +162,8 @@ The app still performs an idempotent schema readiness check at runtime for MVP d
 Phase 2 implementation status:
 
 - Step 1 complete: database schema for `sources`, `source_feeds`, `ingested_articles`, `nodes`, `node_edges`, and `article_comparisons`.
-- Next steps: source ingestion into `ingested_articles`, feed cards from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
+- Step 2 complete: `/api/v1/sources` source manager, source feed records, RSS sync, ingested article persistence, and `ingested_article` feed cards.
+- Next steps: persist analyzed articles back onto ingested articles, feed hydration from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
 
 Production deploy checklist:
 
