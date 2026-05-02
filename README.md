@@ -43,6 +43,12 @@ By default the smoke script forces the in-memory store so it is safe before depl
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
+Read-only live smoke against a deployed backend:
+
+```bash
+PARALLAX_LIVE_API_URL=https://your-backend.example.com python scripts/smoke_live.py
+```
+
 Analyze flow:
 
 ```bash
@@ -146,3 +152,7 @@ Production deploy checklist:
 5. Deploy backend, confirm `/api/v1/health` and `/api/v1/health/db`.
 6. Set frontend `NEXT_PUBLIC_API_URL` to the backend origin and deploy the frontend.
 7. Confirm one browser session can complete onboarding, analyze or ingest a source, view alerts, open sources, save a report, and generate a brief.
+
+CI:
+
+GitHub Actions runs backend compile plus `scripts/smoke_local.py` on pushes and pull requests. The backend workflow also supports manual live smoke: open the workflow dispatch form and pass the deployed backend URL as `api_url`.

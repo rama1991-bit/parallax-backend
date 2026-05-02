@@ -60,3 +60,14 @@ PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
 The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, reports, saved reports, public briefs, topics, feeds, and session isolation.
+
+Read-only deployed backend smoke:
+
+```bash
+PARALLAX_LIVE_API_URL=https://your-backend.example.com python scripts/smoke_live.py
+```
+
+GitHub Actions:
+
+- Pushes and pull requests run backend compile and local smoke.
+- Manual workflow dispatch can run live smoke when `api_url` is provided.
