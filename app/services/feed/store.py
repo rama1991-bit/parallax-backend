@@ -2099,7 +2099,7 @@ def list_ingested_article_records(source_id: str | None = None, limit: int = 100
 
     if not database_enabled():
         articles = [
-            article
+            get_ingested_article_record(article["id"]) or article
             for article in INGESTED_ARTICLES
             if not source_id or article.get("source_id") == source_id
         ]
@@ -2152,7 +2152,14 @@ def get_ingested_article_record(article_id: str) -> dict | None:
     if not database_enabled():
         for article in INGESTED_ARTICLES:
             if article.get("id") == article_id:
-                return article
+                enriched = {**article}
+                source = next((item for item in SOURCES if item.get("id") == article.get("source_id")), None)
+                source_feed = next((item for item in SOURCE_FEEDS if item.get("id") == article.get("source_feed_id")), None)
+                if source:
+                    enriched["source"] = source
+                if source_feed:
+                    enriched["source_feed"] = source_feed
+                return enriched
         return None
 
     _ensure_schema()
@@ -2190,6 +2197,217 @@ def get_ingested_article_record(article_id: str) -> dict | None:
                 return _row_to_ingested_article_record(row) if row else None
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not load ingested article: {exc}") from exc
+
+
+def _article_analysis_payload(article: dict | None) -> dict:
+    if not article:
+        return {}
+    analysis = article.get("analysis") or {}
+    return analysis if isinstance(analysis, dict) else {}
+
+
+def _hydrate_card_from_ingested_article(card: dict, article: dict | None) -> dict:
+    if not card or not article:
+        return card
+
+    analysis = _article_analysis_payload(article)
+    intelligence = analysis.get("intelligence") if isinstance(analysis.get("intelligence"), dict) else None
+    source = article.get("source") if isinstance(article.get("source"), dict) else {}
+    source_feed = article.get("source_feed") if isinstance(article.get("source_feed"), dict) else {}
+    payload = {
+        **(card.get("payload") or {}),
+        "source_id": article.get("source_id") or card.get("source_id"),
+        "source_name": source.get("name") or card.get("source"),
+        "source_type": source.get("source_type"),
+        "source_size": source.get("source_size"),
+        "source_country": source.get("country") or article.get("country"),
+        "source_language": source.get("language") or article.get("language"),
+        "source_feed_id": article.get("source_feed_id") or card.get("source_feed_id"),
+        "source_feed_type": source_feed.get("feed_type"),
+        "feed_url": source_feed.get("feed_url"),
+        "ingested_article_id": article.get("id"),
+        "published_at": article.get("published_at"),
+        "event_fingerprint": article.get("event_fingerprint"),
+        "comparison_keywords": article.get("comparison_keywords") or [],
+        "analysis_status": article.get("analysis_status") or "pending",
+    }
+    if intelligence:
+        payload["intelligence"] = intelligence
+
+    hydrated = {
+        **card,
+        "source_id": article.get("source_id") or card.get("source_id"),
+        "source_feed_id": article.get("source_feed_id") or card.get("source_feed_id"),
+        "ingested_article_id": article.get("id") or card.get("ingested_article_id"),
+        "source": source.get("name") or card.get("source"),
+        "payload": payload,
+    }
+
+    if analysis:
+        confidence = _as_float(analysis.get("confidence"), _as_float(card.get("evidence_score"), 0.5))
+        priority = analysis.get("priority") or (card.get("payload") or {}).get("priority") or "medium"
+        score = _priority_score(priority, confidence)
+        frames = analysis.get("narrative_framing") or []
+        dominant_frame = frames[0] if frames else card.get("framing")
+        report_id = article.get("article_analysis_id") or card.get("report_id") or card.get("article_id")
+        hydrated.update(
+            {
+                "article_id": article.get("article_analysis_id") or card.get("article_id"),
+                "report_id": report_id,
+                "title": analysis.get("title") or article.get("title") or card.get("title"),
+                "summary": analysis.get("summary") or article.get("summary") or card.get("summary"),
+                "priority": score,
+                "priority_score": score,
+                "personalized_score": max(score, _as_float(card.get("personalized_score"), score)),
+                "narrative_signal": (
+                    f"Dominant frame: {dominant_frame}. Confidence reflects extraction and analysis quality, "
+                    "not truth certainty."
+                    if dominant_frame
+                    else card.get("narrative_signal")
+                ),
+                "evidence_score": confidence,
+                "framing": dominant_frame,
+                "analysis": analysis,
+            }
+        )
+        hydrated["recommendations"] = [
+            {
+                "type": "open_report",
+                "label": "Open report",
+                "href": f"/reports/{report_id}",
+                "reason": "Review claims, framing, and extracted evidence signals.",
+            },
+            {
+                "type": "compare",
+                "label": "Compare story",
+                "href": f"/compare?articleId={article.get('id')}",
+                "reason": "Look for similar coverage from other sources.",
+            },
+            {
+                "type": "open_source_article",
+                "label": "Open source article",
+                "href": article.get("url"),
+                "reason": "Inspect the original publication before drawing conclusions.",
+            },
+        ]
+    return hydrated
+
+
+def hydrate_feed_card(card: dict | None) -> dict | None:
+    if not card:
+        return None
+    ingested_article_id = card.get("ingested_article_id") or (card.get("payload") or {}).get("ingested_article_id")
+    if not ingested_article_id:
+        return card
+    article = get_ingested_article_record(ingested_article_id)
+    return _hydrate_card_from_ingested_article(card, article)
+
+
+def get_feed_card_for_ingested_article(
+    ingested_article_id: str,
+    session_id: str = ANONYMOUS_SESSION_ID,
+) -> dict | None:
+    if not database_enabled():
+        for card in FEED_CARDS:
+            if (
+                (card.get("ingested_article_id") or (card.get("payload") or {}).get("ingested_article_id"))
+                == ingested_article_id
+                and (card.get("session_id") or ANONYMOUS_SESSION_ID) == session_id
+                and not card.get("is_dismissed")
+            ):
+                return _hydrate_card_from_ingested_article(card, get_ingested_article_record(ingested_article_id))
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select {_card_columns()}
+                    from public.feed_cards
+                    where ingested_article_id::text = %s
+                    and coalesce(session_id, %s) = %s
+                    and is_dismissed = false
+                    order by created_at desc
+                    limit 1;
+                    """,
+                    (ingested_article_id, ANONYMOUS_SESSION_ID, session_id),
+                )
+                row = cur.fetchone()
+                return hydrate_feed_card(_row_to_card(row)) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load ingested article feed card: {exc}") from exc
+
+
+def build_ingested_article_detail(
+    article_id: str,
+    session_id: str = ANONYMOUS_SESSION_ID,
+) -> dict | None:
+    article = get_ingested_article_record(article_id)
+    if not article:
+        return None
+
+    analysis = _article_analysis_payload(article)
+    intelligence = analysis.get("intelligence") if isinstance(analysis.get("intelligence"), dict) else {}
+    source = article.get("source") if isinstance(article.get("source"), dict) else None
+    source_feed = article.get("source_feed") if isinstance(article.get("source_feed"), dict) else None
+    feed_card = get_feed_card_for_ingested_article(article_id, session_id=session_id)
+    comparison_hooks = intelligence.get("comparison_hooks") or {
+        "search_queries": [article.get("title") or article.get("url")],
+        "similarity_keywords": article.get("comparison_keywords") or [],
+        "event_fingerprint": article.get("event_fingerprint") or "",
+    }
+    key_claims = analysis.get("key_claims") or intelligence.get("key_claims") or []
+    frames = analysis.get("narrative_framing") or []
+    topics = analysis.get("topics") or []
+
+    nodes_preview = [
+        {
+            "node_type": "article",
+            "label": article.get("title") or article.get("url") or "Article",
+            "status": article.get("analysis_status") or "pending",
+        }
+    ]
+    if source:
+        nodes_preview.append(
+            {
+                "node_type": "source",
+                "label": source.get("name") or "Source",
+                "source_type": source.get("source_type"),
+            }
+        )
+    for topic in topics[:4]:
+        nodes_preview.append({"node_type": "topic", "label": topic})
+    for claim in key_claims[:4]:
+        nodes_preview.append({"node_type": "claim", "label": claim})
+    for frame in frames[:3]:
+        nodes_preview.append({"node_type": "narrative", "label": frame})
+
+    return {
+        "article": article,
+        "source": source,
+        "source_feed": source_feed,
+        "analysis": analysis,
+        "intelligence": intelligence,
+        "feed_card": feed_card,
+        "nodes_preview": nodes_preview,
+        "comparison_hooks": comparison_hooks,
+        "tabs": [
+            "Summary",
+            "Claims",
+            "Compare",
+            "Source",
+            "Author",
+            "Background",
+            "OSINT",
+        ],
+        "limitations": [
+            "This detail view reports extracted structure, not truth certainty.",
+            "OSINT and compare panels are bounded context surfaces and should not be treated as final judgment.",
+            "Full node graph materialization is planned for the node-based analysis step.",
+        ],
+    }
 
 
 def create_feed_subscription(
@@ -3102,7 +3320,8 @@ def list_feed_cards(
 
     if not database_enabled():
         cards = _filtered_in_memory(filter_type, session_id)
-        return sorted(cards, key=lambda card: card.get("created_at", ""), reverse=True)[:limit]
+        cards = sorted(cards, key=lambda card: card.get("created_at", ""), reverse=True)[:limit]
+        return [hydrate_feed_card(card) or card for card in cards]
 
     _ensure_schema()
     where = ["is_dismissed = false", "coalesce(session_id, %s) = %s"]
@@ -3135,7 +3354,8 @@ def list_feed_cards(
                     """,
                     (*params, limit),
                 )
-                return [_row_to_card(row) for row in cur.fetchall()]
+                cards = [_row_to_card(row) for row in cur.fetchall()]
+                return [hydrate_feed_card(card) or card for card in cards]
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not load feed cards: {exc}") from exc
 
@@ -3370,7 +3590,7 @@ def get_feed_card(card_id: str, session_id: str = ANONYMOUS_SESSION_ID) -> dict 
     if not database_enabled():
         for card in FEED_CARDS:
             if card["id"] == card_id and (card.get("session_id") or ANONYMOUS_SESSION_ID) == session_id:
-                return card
+                return hydrate_feed_card(card) or card
         return None
 
     _ensure_schema()
@@ -3387,7 +3607,7 @@ def get_feed_card(card_id: str, session_id: str = ANONYMOUS_SESSION_ID) -> dict 
                     (card_id, ANONYMOUS_SESSION_ID, session_id),
                 )
                 row = cur.fetchone()
-                return _row_to_card(row) if row else None
+                return hydrate_feed_card(_row_to_card(row)) if row else None
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not load feed card: {exc}") from exc
 

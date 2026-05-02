@@ -235,7 +235,13 @@ def main() -> int:
 
     feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
     assert len(feed["cards"]) >= 5, feed
-    assert any((item.get("payload") or {}).get("ingested_article_id") == ingested_article_id for item in feed["cards"]), feed
+    ingested_feed_card = next(
+        item
+        for item in feed["cards"]
+        if (item.get("payload") or {}).get("ingested_article_id") == ingested_article_id
+    )
+    assert ingested_feed_card["report_id"] == ingested_analysis["report_id"], ingested_feed_card
+    assert ingested_feed_card["analysis"]["intelligence"]["comparison_hooks"]["event_fingerprint"], ingested_feed_card
 
     alerts = _assert_ok(client.get("/api/v1/alerts", headers=headers), "alerts").json()
     assert alerts["unread_count"] >= 4, alerts
@@ -269,12 +275,17 @@ def main() -> int:
     ).json()["articles"]
     assert source_articles and source_articles[0]["id"] == ingested_article_id, source_articles
     assert source_articles[0]["analysis_status"] == "analyzed", source_articles
-    article_detail = _assert_ok(
-        client.get(f"/api/v1/sources/articles/{ingested_article_id}"),
+    article_detail_payload = _assert_ok(
+        client.get(f"/api/v1/sources/articles/{ingested_article_id}", headers=headers),
         "sources/article-detail",
-    ).json()["article"]
+    ).json()
+    article_detail = article_detail_payload["article"]
     assert article_detail["event_fingerprint"], article_detail
     assert article_detail["analysis"]["intelligence"]["scores"]["cross_source_need"] > 0, article_detail
+    assert article_detail_payload["feed_card"]["report_id"] == ingested_analysis["report_id"], article_detail_payload
+    assert article_detail_payload["source"]["name"] == "Example Daily", article_detail_payload
+    assert article_detail_payload["comparison_hooks"]["event_fingerprint"] == article_detail["event_fingerprint"], article_detail_payload
+    assert any(node["node_type"] == "claim" for node in article_detail_payload["nodes_preview"]), article_detail_payload
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

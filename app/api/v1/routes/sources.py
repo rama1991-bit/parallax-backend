@@ -6,9 +6,9 @@ from pydantic import BaseModel, HttpUrl
 from app.core.session import get_session_id
 from app.services.feed.store import (
     FeedStoreError,
+    build_ingested_article_detail,
     create_source_feed_record,
     create_source_record,
-    get_ingested_article_record,
     get_source_record,
     list_ingested_article_records,
     list_source_feed_records,
@@ -118,14 +118,17 @@ async def create_source(payload: SourceCreate):
 
 
 @router.get("/articles/{article_id}")
-async def get_ingested_article(article_id: str):
+async def get_ingested_article(
+    article_id: str,
+    session_id: str = Depends(get_session_id),
+):
     try:
-        article = get_ingested_article_record(article_id)
+        detail = build_ingested_article_detail(article_id, session_id=session_id)
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not article:
+    if not detail:
         raise HTTPException(status_code=404, detail="Ingested article not found")
-    return {"article": article}
+    return detail
 
 
 @router.get("/{source_id}")

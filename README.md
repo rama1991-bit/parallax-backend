@@ -107,9 +107,10 @@ curl -X POST http://localhost:8000/api/v1/sources \
 curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
 
 curl http://localhost:8000/api/v1/sources/<source_id>/articles
+curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, and node preview. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -168,7 +169,8 @@ Phase 2 implementation status:
 - Step 1 complete: database schema for `sources`, `source_feeds`, `ingested_articles`, `nodes`, `node_edges`, and `article_comparisons`.
 - Step 2 complete: `/api/v1/sources` source manager, source feed records, RSS sync, ingested article persistence, and `ingested_article` feed cards.
 - Step 3 complete: `POST /api/v1/analyze` accepts `ingested_article_id`, links analysis back to ingested articles, enriches existing source-ingested feed cards, and returns structured Phase 2 intelligence.
-- Next steps: feed hydration/detail from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
+- Step 4 complete: feed cards and article detail hydrate from persisted ingested-article analysis, including comparison hooks and node preview.
+- Next steps: article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
 
 Production deploy checklist:
 
