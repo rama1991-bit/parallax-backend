@@ -10,9 +10,15 @@ The current product surface is backed by these persisted tables:
 - `monitors`
 - `feeds`
 - `feed_items`
+- `sources`
+- `source_feeds`
+- `ingested_articles`
+- `nodes`
+- `node_edges`
+- `article_comparisons`
 - `schema_migrations`
 
-Sources, alerts, saved reports, and public briefs are derived from `feed_cards` plus related payloads, so no additional tables are required for this MVP slice.
+Phase 1 sources, alerts, saved reports, and public briefs are still derived from `feed_cards` plus related payloads. Phase 2 adds first-class source, article, node, and comparison tables so ingestion and node-based analysis can be implemented in small follow-up commits.
 
 Before production traffic:
 
@@ -44,6 +50,7 @@ Known MVP gaps:
 - Feed sync is manual; recurring background ingestion is not implemented yet.
 - Analyze uses heuristic mode unless `AI_PROVIDER=openai` is configured.
 - Brief share tokens are signed but not revocable because briefs are derived, not persisted.
+- Phase 2 schema exists, but source ingestion, persisted article hydration, article-id compare, node detail tabs, OSINT panels, and default source seeds are follow-up implementation steps.
 
 ## Smoke
 

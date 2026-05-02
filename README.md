@@ -13,6 +13,7 @@ This deployable MVP includes:
 - public briefs with signed share tokens
 - source intelligence profiles
 - onboarding setup flow
+- Phase 2 schema foundation for sources, ingested articles, nodes, and comparisons
 
 Run locally:
 
@@ -142,6 +143,11 @@ python scripts/apply_migrations.py
 ```
 
 The app still performs an idempotent schema readiness check at runtime for MVP deploy safety, but production deployments should run the SQL migrations explicitly before serving traffic.
+
+Phase 2 implementation status:
+
+- Step 1 complete: database schema for `sources`, `source_feeds`, `ingested_articles`, `nodes`, `node_edges`, and `article_comparisons`.
+- Next steps: source ingestion into `ingested_articles`, feed cards from persisted articles, article-id compare, node-based detail views, bounded OSINT context, and default source seeds.
 
 Production deploy checklist:
 
