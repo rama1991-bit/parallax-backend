@@ -106,11 +106,14 @@ curl -X POST http://localhost:8000/api/v1/sources \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"Example Daily\",\"website_url\":\"https://example.com\",\"rss_url\":\"https://example.com/rss.xml\",\"country\":\"United States\",\"language\":\"English\",\"source_size\":\"medium\",\"source_type\":\"newspaper\"}"
 
-curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
+curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
 
 curl http://localhost:8000/api/v1/sources/defaults/preview
-curl -X POST http://localhost:8000/api/v1/sources/defaults/seed
-curl -X POST http://localhost:8000/api/v1/sources/sync-active
+curl -X POST http://localhost:8000/api/v1/sources/defaults/seed \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl -X POST http://localhost:8000/api/v1/sources/sync-active \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
 python scripts/seed_default_sources.py --preview
 python scripts/seed_default_sources.py
 python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25
@@ -121,7 +124,7 @@ curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits and per-feed error isolation. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed and sync API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits and per-feed error isolation. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -155,6 +158,7 @@ Environment:
 - `ENV`: use `production` in deployed environments.
 - `DEBUG`: keep `false` in production. `/debug/env` is hidden when `ENV=production` and `DEBUG=false`.
 - `SECRET_KEY`: required for signed public brief tokens. Use a long random value in production.
+- `ADMIN_API_KEY`: required for admin-only source seed and sync API routes. Send it as `X-Parallax-Admin-Key`.
 - `DATABASE_URL`: Supabase/Postgres connection string. Non-Postgres values use the in-memory local fallback.
 - `DATABASE_SSLMODE`: set to `require` for Supabase if the connection string does not already include SSL settings.
 - `FRONTEND_URL`: deployed frontend origin, used for CORS and public share URLs.
@@ -188,12 +192,13 @@ Phase 2 implementation status:
 - Step 7 complete: `GET /api/v1/sources/articles/{article_id}/osint` returns bounded OSINT context and article detail includes `osint_context`.
 - Step 8 complete: `/api/v1/sources/defaults/preview`, `/api/v1/sources/defaults/seed`, and `scripts/seed_default_sources.py` provide an idempotent multilingual default source database.
 - Production hardening 1 complete: `POST /api/v1/sources/sync-active` and `scripts/sync_active_sources.py` make active RSS ingestion scheduler-friendly with batch limits and error isolation.
-- Next work should harden admin auth/roles, deployment automation, and production data quality review.
+- Production hardening 2 complete: source seed/sync API routes require `X-Parallax-Admin-Key` backed by `ADMIN_API_KEY`.
+- Next work should harden deployment automation and production data quality review.
 
 Production deploy checklist:
 
 1. Create Supabase/Postgres database.
-2. Set backend env vars: `ENV=production`, `DEBUG=false`, `SECRET_KEY`, `DATABASE_URL`, `DATABASE_SSLMODE=require`, `FRONTEND_URL`, optional `BACKEND_CORS_ORIGINS`, and AI settings.
+2. Set backend env vars: `ENV=production`, `DEBUG=false`, `SECRET_KEY`, `ADMIN_API_KEY`, `DATABASE_URL`, `DATABASE_SSLMODE=require`, `FRONTEND_URL`, optional `BACKEND_CORS_ORIGINS`, and AI settings.
 3. Run `python scripts/apply_migrations.py` before serving production traffic.
 4. Run `python scripts/smoke_local.py` locally, then optionally `PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py` against a staging database.
 5. Deploy backend, confirm `/api/v1/health` and `/api/v1/health/db`.

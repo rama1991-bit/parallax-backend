@@ -33,7 +33,7 @@ These frontend surfaces have real backend support:
 - `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze` by URL or `ingested_article_id`
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
-- `/sources`: `GET/POST /api/v1/sources`, default source preview/seed, `POST /api/v1/sources/sync-active`, `POST /api/v1/sources/{source_id}/sync`, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
+- `/sources`: `GET/POST /api/v1/sources`, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
 - `/compare`: `POST /api/v1/compare`, `GET /api/v1/compare/{article_id}`
 - `/notifications`: `GET /api/v1/alerts`, read/read-all/unread count
 - `/reports/{id}`: report detail, save/unsave, JSON/Markdown export
@@ -46,6 +46,7 @@ These frontend surfaces have real backend support:
 Known MVP gaps:
 
 - Full user auth is not implemented; browser sessions use `X-Parallax-Session-Id`.
+- Admin-only source seed and sync routes use `X-Parallax-Admin-Key` backed by `ADMIN_API_KEY`; rotate it like any production secret.
 - Source intelligence is sample-based and session-scoped.
 - Feed and source sync are schedulable API/script calls; a hosted recurring worker still needs to be configured in the deployment platform.
 - Analyze uses heuristic mode unless `AI_PROVIDER=openai` is configured.
@@ -68,7 +69,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, default source seed preview/import, active source sync, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed and sync, default source seed preview/import, active source sync, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 

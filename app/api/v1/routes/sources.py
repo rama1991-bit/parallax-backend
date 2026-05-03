@@ -3,6 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 
+from app.core.admin import require_admin_key
 from app.core.session import get_session_id
 from app.services.default_sources import preview_default_sources, seed_default_sources
 from app.services.feed.store import (
@@ -129,6 +130,7 @@ async def preview_default_source_database(
 @router.post("/defaults/seed")
 async def seed_default_source_database(
     limit: int | None = Query(default=None, ge=1, le=250),
+    _: None = Depends(require_admin_key),
 ):
     try:
         return seed_default_sources(limit=limit)
@@ -139,12 +141,17 @@ async def seed_default_source_database(
 @router.post("/seed-defaults")
 async def seed_default_source_database_alias(
     limit: int | None = Query(default=None, ge=1, le=250),
+    _: None = Depends(require_admin_key),
 ):
-    return await seed_default_source_database(limit=limit)
+    try:
+        return seed_default_sources(limit=limit)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/sync-active")
 async def sync_active_sources(
+    _: None = Depends(require_admin_key),
     session_id: str = Depends(get_session_id),
     source_limit: int = Query(default=50, ge=1, le=250),
     feed_limit: int = Query(default=100, ge=1, le=500),
@@ -269,6 +276,7 @@ async def list_source_articles(
 @router.post("/{source_id}/sync")
 async def sync_source(
     source_id: str,
+    _: None = Depends(require_admin_key),
     session_id: str = Depends(get_session_id),
     limit: int = Query(default=20, ge=1, le=50),
     card_limit: int = Query(default=10, ge=0, le=50),

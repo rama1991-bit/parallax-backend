@@ -15,6 +15,7 @@ from uuid import uuid4
 if os.getenv("PARALLAX_SMOKE_USE_CONFIG_DB", "").lower() not in {"1", "true", "yes"}:
     os.environ["DATABASE_URL"] = ""
 os.environ.setdefault("ANALYZE_COOLDOWN_SECONDS", "0")
+os.environ.setdefault("ADMIN_API_KEY", "smoke-admin-key")
 
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -60,6 +61,7 @@ def main() -> int:
     session_id = f"smoke-{uuid4()}"
     other_session_id = f"smoke-other-{uuid4()}"
     headers = {"X-Parallax-Session-Id": session_id}
+    admin_headers = {**headers, "X-Parallax-Admin-Key": "smoke-admin-key"}
 
     _assert_ok(client.get("/api/v1/health"), "health")
     _assert_ok(client.get("/api/v1/health/db"), "health/db")
@@ -133,8 +135,11 @@ def main() -> int:
     assert source["name"] == "Example Daily", source
     assert source_feed["feed_type"] == "homepage", source_feed
 
+    denied_source_sync = client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers)
+    assert denied_source_sync.status_code == 403, denied_source_sync.text
+
     source_sync = _assert_ok(
-        client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers),
+        client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
         "sources/sync-no-rss",
     ).json()
     assert source_sync["rss_feed_count"] == 0, source_sync
@@ -144,11 +149,17 @@ def main() -> int:
     assert default_preview["summary"]["language_count"] >= 8, default_preview
     assert default_preview["summary"]["rss_count"] >= 20, default_preview
 
-    default_seed = _assert_ok(client.post("/api/v1/sources/defaults/seed"), "sources/defaults-seed").json()
+    denied_default_seed = client.post("/api/v1/sources/defaults/seed")
+    assert denied_default_seed.status_code == 403, denied_default_seed.text
+
+    default_seed = _assert_ok(
+        client.post("/api/v1/sources/defaults/seed", headers=admin_headers),
+        "sources/defaults-seed",
+    ).json()
     assert default_seed["summary"]["seeded_source_count"] == default_preview["summary"]["source_count"], default_seed
     assert default_seed["summary"]["seeded_feed_count"] == default_preview["summary"]["rss_count"], default_seed
     default_seed_alias = _assert_ok(
-        client.post("/api/v1/sources/seed-defaults?limit=5"),
+        client.post("/api/v1/sources/seed-defaults?limit=5", headers=admin_headers),
         "sources/defaults-seed-alias",
     ).json()
     assert default_seed_alias["summary"]["seeded_source_count"] == 5, default_seed_alias
@@ -195,7 +206,7 @@ def main() -> int:
         active_sync = _assert_ok(
             client.post(
                 "/api/v1/sources/sync-active?source_limit=2&feed_limit=2&article_limit=2&card_limit=2",
-                headers=headers,
+                headers=admin_headers,
             ),
             "sources/sync-active",
         ).json()
@@ -204,7 +215,7 @@ def main() -> int:
         assert active_sync["article_count"] >= 1, active_sync
         assert active_sync["card_count"] >= 1, active_sync
         ingested = _assert_ok(
-            client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers),
+            client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
             "sources/sync-rss",
         ).json()
     finally:

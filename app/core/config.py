@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     DATABASE_SSLMODE: str | None = None
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_CORS_ORIGINS: str = ""
+    ADMIN_API_KEY: str | None = None
     AI_PROVIDER: str = "heuristic"
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4o-mini"
