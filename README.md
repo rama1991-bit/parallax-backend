@@ -51,6 +51,16 @@ Read-only live smoke against a deployed backend:
 PARALLAX_LIVE_API_URL=https://your-backend.example.com python scripts/smoke_live.py
 ```
 
+Deploy readiness check:
+
+```bash
+python scripts/check_deploy_readiness.py
+python scripts/check_deploy_readiness.py --json
+python scripts/check_deploy_readiness.py --strict
+```
+
+The readiness script validates production-critical configuration without opening a database connection. It checks production env posture, signed-token/admin secrets, Postgres/Supabase settings, SSL mode, frontend/CORS origins, AI provider settings, quota/fetch limits, OSINT retrieval posture, and prints the recommended recurring source-ingestion scheduler command.
+
 Analyze flow:
 
 ```bash
@@ -126,6 +136,14 @@ curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 
 Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed and sync API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits and per-feed error isolation. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
+Recurring ingestion scheduler:
+
+```bash
+*/15 * * * * cd /app && python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25
+```
+
+For platforms with scheduled jobs, use the same command every 15 minutes. For platforms that prefer HTTP jobs, call `POST /api/v1/sources/sync-active` with `X-Parallax-Admin-Key`. Keep the batch limits in place until the source database has been reviewed for feed quality and traffic behavior.
+
 Onboarding flow:
 
 ```bash
@@ -199,12 +217,14 @@ Production deploy checklist:
 
 1. Create Supabase/Postgres database.
 2. Set backend env vars: `ENV=production`, `DEBUG=false`, `SECRET_KEY`, `ADMIN_API_KEY`, `DATABASE_URL`, `DATABASE_SSLMODE=require`, `FRONTEND_URL`, optional `BACKEND_CORS_ORIGINS`, and AI settings.
-3. Run `python scripts/apply_migrations.py` before serving production traffic.
-4. Run `python scripts/smoke_local.py` locally, then optionally `PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py` against a staging database.
-5. Deploy backend, confirm `/api/v1/health` and `/api/v1/health/db`.
-6. Set frontend `NEXT_PUBLIC_API_URL` to the backend origin and deploy the frontend.
-7. Confirm one browser session can complete onboarding, analyze or ingest a source, view alerts, open sources, save a report, and generate a brief.
+3. Run `python scripts/check_deploy_readiness.py --strict` and fix blocking errors.
+4. Run `python scripts/apply_migrations.py` before serving production traffic.
+5. Run `python scripts/smoke_local.py` locally, then optionally `PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py` against a staging database.
+6. Deploy backend, confirm `/api/v1/health` and `/api/v1/health/db`.
+7. Configure a recurring worker for `python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25`, or a protected HTTP job for `POST /api/v1/sources/sync-active`.
+8. Set frontend `NEXT_PUBLIC_API_URL` to the backend origin and deploy the frontend.
+9. Confirm one browser session can complete onboarding, analyze or ingest a source, view alerts, open sources, save a report, and generate a brief.
 
 CI:
 
-GitHub Actions runs backend compile plus `scripts/smoke_local.py` on pushes and pull requests. The backend workflow also supports manual live smoke: open the workflow dispatch form and pass the deployed backend URL as `api_url`.
+GitHub Actions runs backend compile, deploy-readiness JSON output, and `scripts/smoke_local.py` on pushes and pull requests. The backend workflow also supports manual live smoke: open the workflow dispatch form and pass the deployed backend URL as `api_url`.

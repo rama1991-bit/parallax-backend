@@ -36,6 +36,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -B -m compileall -q app scripts
 
+      - name: Deploy readiness
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B scripts/check_deploy_readiness.py --json
+
       - name: Local smoke
         env:
           PYTHONDONTWRITEBYTECODE: "1"
