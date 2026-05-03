@@ -110,8 +110,10 @@ curl -X POST http://localhost:8000/api/v1/sources/<source_id>/sync
 
 curl http://localhost:8000/api/v1/sources/defaults/preview
 curl -X POST http://localhost:8000/api/v1/sources/defaults/seed
+curl -X POST http://localhost:8000/api/v1/sources/sync-active
 python scripts/seed_default_sources.py --preview
 python scripts/seed_default_sources.py
+python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25
 
 curl http://localhost:8000/api/v1/sources/<source_id>/articles
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>
@@ -119,7 +121,7 @@ curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits and per-feed error isolation. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Onboarding flow:
 
@@ -185,7 +187,8 @@ Phase 2 implementation status:
 - Step 6 complete: article detail materializes `nodes` and `node_edges`, exposes node perspectives, and supports node-based detail tabs in the frontend.
 - Step 7 complete: `GET /api/v1/sources/articles/{article_id}/osint` returns bounded OSINT context and article detail includes `osint_context`.
 - Step 8 complete: `/api/v1/sources/defaults/preview`, `/api/v1/sources/defaults/seed`, and `scripts/seed_default_sources.py` provide an idempotent multilingual default source database.
-- Phase 2 core requirements are now implemented; next work should harden scheduling, auth, deployment, and production data quality.
+- Production hardening 1 complete: `POST /api/v1/sources/sync-active` and `scripts/sync_active_sources.py` make active RSS ingestion scheduler-friendly with batch limits and error isolation.
+- Next work should harden admin auth/roles, deployment automation, and production data quality review.
 
 Production deploy checklist:
 

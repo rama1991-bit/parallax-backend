@@ -20,9 +20,9 @@ os.environ.setdefault("ANALYZE_COOLDOWN_SECONDS", "0")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.api.v1.routes import analyze as analyze_route  # noqa: E402
-from app.api.v1.routes import sources as sources_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
+from app.services import source_sync as source_sync_service  # noqa: E402
 from app.services.feed import store  # noqa: E402
 
 
@@ -166,19 +166,24 @@ def main() -> int:
     ).json()["feed"]
     assert rss_feed["feed_type"] == "rss", rss_feed
 
-    original_parse_rss_feed = sources_route.parse_rss_feed
+    original_parse_rss_feed = source_sync_service.parse_rss_feed
 
     async def fake_parse_rss_feed(url: str, limit: int = 20):
+        article_url = (
+            "https://example.com/grid-resilience-plan"
+            if url == "https://example.com/rss.xml"
+            else f"{url.rstrip('/')}/grid-resilience-plan"
+        )
         return {
             "url": url,
-            "title": "Example Daily RSS",
+            "title": "Fixture RSS",
             "description": "Fixture feed for local smoke.",
             "items": [
                 {
-                    "external_id": "source-item-1",
+                    "external_id": f"source-item-{abs(hash(url))}",
                     "title": "Regulators publish grid resilience plan",
                     "summary": "A source item about grid resilience was ingested for Phase 2.",
-                    "url": "https://example.com/grid-resilience-plan",
+                    "url": article_url,
                     "published_at": "2026-05-02T10:00:00+00:00",
                     "raw": {"fixture": True},
                 }
@@ -186,13 +191,24 @@ def main() -> int:
         }
 
     try:
-        sources_route.parse_rss_feed = fake_parse_rss_feed
+        source_sync_service.parse_rss_feed = fake_parse_rss_feed
+        active_sync = _assert_ok(
+            client.post(
+                "/api/v1/sources/sync-active?source_limit=2&feed_limit=2&article_limit=2&card_limit=2",
+                headers=headers,
+            ),
+            "sources/sync-active",
+        ).json()
+        assert active_sync["source_count"] >= 1, active_sync
+        assert active_sync["feed_count"] >= 1, active_sync
+        assert active_sync["article_count"] >= 1, active_sync
+        assert active_sync["card_count"] >= 1, active_sync
         ingested = _assert_ok(
             client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers),
             "sources/sync-rss",
         ).json()
     finally:
-        sources_route.parse_rss_feed = original_parse_rss_feed
+        source_sync_service.parse_rss_feed = original_parse_rss_feed
 
     assert len(ingested["articles"]) == 1, ingested
     assert len(ingested["cards"]) == 1, ingested

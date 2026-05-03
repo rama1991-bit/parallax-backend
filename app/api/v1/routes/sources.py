@@ -16,11 +16,9 @@ from app.services.feed.store import (
     list_ingested_article_records,
     list_source_feed_records,
     list_source_records,
-    save_ingested_articles,
-    update_source_feed_sync_result,
 )
 from app.services.osint import OSINTContextError, build_article_osint_context
-from app.services.rss import RSSSyncError, parse_rss_feed
+from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
 router = APIRouter()
 
@@ -145,6 +143,26 @@ async def seed_default_source_database_alias(
     return await seed_default_source_database(limit=limit)
 
 
+@router.post("/sync-active")
+async def sync_active_sources(
+    session_id: str = Depends(get_session_id),
+    source_limit: int = Query(default=50, ge=1, le=250),
+    feed_limit: int = Query(default=100, ge=1, le=500),
+    article_limit: int = Query(default=10, ge=1, le=50),
+    card_limit: int = Query(default=25, ge=0, le=250),
+):
+    try:
+        return await sync_active_source_feeds(
+            session_id=session_id,
+            source_limit=source_limit,
+            feed_limit=feed_limit,
+            article_limit=article_limit,
+            card_limit=card_limit,
+        )
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/articles/{article_id}")
 async def get_ingested_article(
     article_id: str,
@@ -256,48 +274,17 @@ async def sync_source(
     card_limit: int = Query(default=10, ge=0, le=50),
 ):
     try:
-        source = get_source_record(source_id)
-        if not source:
+        try:
+            return await sync_source_feeds(
+                source_id,
+                session_id=session_id,
+                article_limit=limit,
+                card_limit=card_limit,
+            )
+        except FeedStoreError as exc:
+            if str(exc) != "Source not found.":
+                raise
             raise HTTPException(status_code=404, detail="Source not found")
-
-        rss_feeds = list_source_feed_records(source_id=source_id, feed_type="rss", status="active")
-        articles = []
-        cards = []
-        errors = []
-
-        for feed in rss_feeds:
-            try:
-                parsed = await parse_rss_feed(feed["feed_url"], limit=limit)
-                updated_feed = update_source_feed_sync_result(feed["id"], success=True, title=parsed.get("title"))
-                saved = save_ingested_articles(
-                    source,
-                    updated_feed or feed,
-                    parsed.get("items") or [],
-                    session_id=session_id,
-                    card_limit=max(0, card_limit - len(cards)),
-                )
-                articles.extend(saved["articles"])
-                cards.extend(saved["cards"])
-            except RSSSyncError as exc:
-                failed_feed = update_source_feed_sync_result(feed["id"], success=False, error=str(exc))
-                errors.append(
-                    {
-                        "feed_id": feed["id"],
-                        "feed_url": feed["feed_url"],
-                        "error": str(exc),
-                        "last_checked_at": (failed_feed or {}).get("last_checked_at"),
-                    }
-                )
-
-        return {
-            "source": get_source_record(source_id) or source,
-            "rss_feed_count": len(rss_feeds),
-            "article_count": len(articles),
-            "card_count": len(cards),
-            "articles": articles,
-            "cards": cards,
-            "errors": errors,
-        }
     except HTTPException:
         raise
     except FeedStoreError as exc:
