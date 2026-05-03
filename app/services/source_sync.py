@@ -40,6 +40,56 @@ def _safe_record_sync_run(**kwargs) -> dict | None:
         return None
 
 
+def _skipped_source_result(source: dict, session_id: str, started_at: datetime, reason: str) -> dict:
+    limits = {"article_limit_per_feed": 0, "card_limit": 0, "feed_limit": 0}
+    summary = {
+        "source_id": source.get("id"),
+        "source_name": source.get("name"),
+        "rss_feed_count": 0,
+        "synced_feed_count": 0,
+        "article_count": 0,
+        "card_count": 0,
+        "error_count": 0,
+        "skipped_reason": reason,
+    }
+    run = _safe_record_sync_run(
+        sync_scope="source",
+        status="skipped",
+        session_id=session_id,
+        source_id=source.get("id"),
+        source_name=source.get("name"),
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        source_count=1,
+        feed_count=0,
+        synced_feed_count=0,
+        article_count=0,
+        card_count=0,
+        error_count=0,
+        limits=limits,
+        errors=[],
+        summary=summary,
+    )
+    result = {
+        "source": source,
+        "status": "skipped",
+        "skipped_reason": reason,
+        "rss_feed_count": 0,
+        "synced_feed_count": 0,
+        "article_count": 0,
+        "card_count": 0,
+        "articles": [],
+        "cards": [],
+        "synced_feeds": [],
+        "errors": [],
+        "limits": limits,
+    }
+    if run:
+        result["sync_run"] = run
+        result["sync_run_id"] = run["id"]
+    return result
+
+
 async def sync_source_feeds(
     source_id: str,
     session_id: str = ANONYMOUS_SESSION_ID,
@@ -51,6 +101,13 @@ async def sync_source_feeds(
     source = get_source_record(source_id)
     if not source:
         raise FeedStoreError("Source not found.")
+    if source.get("review_status") in {"quarantined", "disabled"}:
+        return _skipped_source_result(
+            source,
+            session_id=session_id,
+            started_at=started_at,
+            reason=f"Source review status is {source.get('review_status')}.",
+        )
 
     max_articles = _clamp(article_limit, default=20, minimum=1, maximum=50)
     max_cards = _clamp(card_limit, default=10, minimum=0, maximum=50)

@@ -37,7 +37,7 @@ These frontend surfaces have real backend support:
 - `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze` by URL or `ingested_article_id`
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
-- `/sources`: `GET/POST /api/v1/sources`, source health summaries, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, admin-key-protected sync-run history, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
+- `/sources`: `GET/POST /api/v1/sources`, source health summaries, quality scores, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, admin-key-protected sync-run history, review queue, source review updates, quality recalculation, feed pause/quarantine/disable controls, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
 - `/compare`: `POST /api/v1/compare`, `GET /api/v1/compare/{article_id}`
 - `/notifications`: `GET /api/v1/alerts`, read/read-all/unread count
 - `/reports/{id}`: report detail, save/unsave, JSON/Markdown export
@@ -59,6 +59,7 @@ Known MVP gaps:
 - Default source metadata is intentionally conservative and should be reviewed for legal/feed-term compliance before production-scale ingestion.
 - Active RSS ingestion can be scheduled with `POST /api/v1/sources/sync-active` or `python scripts/sync_active_sources.py`.
 - Source ingestion now records `source_sync_runs` and exposes source health summaries; treat these as operational signals, not editorial quality judgments.
+- Source quality governance now records review status, review notes, disabled reasons, quality scores, and feed-level governance status; treat quality scores as ingestion readiness signals, not source credibility verdicts.
 
 ## Deploy Readiness
 
@@ -127,6 +128,49 @@ Watch these fields after deploy:
 
 Initial alert candidates: no successful source sync in 24 hours, repeated `error` status, `success_rate` below 50% after several runs, or zero `articles_24h` for high-priority active sources.
 
+## Source Quality Governance
+
+Admin source review queue:
+
+```bash
+curl https://your-backend.example.com/api/v1/sources/needs-review \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+```
+
+Mark a source reviewed after metadata/feed-term inspection:
+
+```bash
+curl -X POST https://your-backend.example.com/api/v1/sources/<source_id>/review \
+  -H "Content-Type: application/json" \
+  -H "X-Parallax-Admin-Key: <admin_api_key>" \
+  -d '{"review_status":"reviewed","review_notes":"Metadata and feed terms reviewed.","terms_reviewed":true}'
+```
+
+Pause or quarantine a bad feed:
+
+```bash
+curl -X POST https://your-backend.example.com/api/v1/sources/feeds/<feed_id>/status \
+  -H "Content-Type: application/json" \
+  -H "X-Parallax-Admin-Key: <admin_api_key>" \
+  -d '{"status":"quarantined","disabled_reason":"Repeated malformed items."}'
+```
+
+Recalculate source quality:
+
+```bash
+curl -X POST https://your-backend.example.com/api/v1/sources/<source_id>/quality/recalculate \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+```
+
+Governance behavior:
+
+- Source review statuses: `needs_review`, `reviewed`, `quarantined`, `disabled`
+- Feed statuses: `active`, `paused`, `quarantined`, `disabled`
+- Only `active` RSS feeds are ingested.
+- Sources marked `quarantined` or `disabled` are skipped by source sync and scheduler runs.
+- `quality_score` measures metadata completeness, feed availability, sync success, recent article production, terms review, and governance risks.
+- `quality_score` is an ingestion-readiness signal, not a truth, bias, or credibility verdict.
+
 ## Smoke
 
 Safe local smoke:
@@ -141,7 +185,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed, sync, and sync-run history, default source seed preview/import, active source sync, sync-run persistence, source health summaries, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed, sync, sync-run history, source review, review queue, feed quarantine/reactivation, source disable skip behavior, default source seed preview/import, active source sync, sync-run persistence, source health summaries, quality scoring, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 

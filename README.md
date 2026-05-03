@@ -16,6 +16,7 @@ This deployable MVP includes:
 - Phase 2 source records, source feeds, RSS sync, and ingested-article feed cards
 - Phase 2 node-based article detail, article-id comparisons, bounded OSINT context, and default source seeds
 - source ingestion observability with sync-run history and source health summaries
+- source quality governance with review statuses, quality scores, and feed quarantine controls
 
 Run locally:
 
@@ -127,6 +128,18 @@ curl -X POST http://localhost:8000/api/v1/sources/sync-active \
   -H "X-Parallax-Admin-Key: <admin_api_key>"
 curl http://localhost:8000/api/v1/sources/sync-runs \
   -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl http://localhost:8000/api/v1/sources/needs-review \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl -X POST http://localhost:8000/api/v1/sources/<source_id>/review \
+  -H "Content-Type: application/json" \
+  -H "X-Parallax-Admin-Key: <admin_api_key>" \
+  -d "{\"review_status\":\"reviewed\",\"review_notes\":\"Metadata and feed terms reviewed.\",\"terms_reviewed\":true}"
+curl -X POST http://localhost:8000/api/v1/sources/<source_id>/quality/recalculate \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl -X POST http://localhost:8000/api/v1/sources/feeds/<feed_id>/status \
+  -H "Content-Type: application/json" \
+  -H "X-Parallax-Admin-Key: <admin_api_key>" \
+  -d "{\"status\":\"quarantined\",\"disabled_reason\":\"Feed returned repeated bad data.\"}"
 python scripts/seed_default_sources.py --preview
 python scripts/seed_default_sources.py
 python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25
@@ -139,7 +152,7 @@ curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/nodes
 curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed, sync, and sync-run history API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits, per-feed error isolation, JSON scheduler output, `source_sync_runs` logging, and source health summaries. Source list/detail responses include health fields such as status, last success, last error, success rate, and articles in the last 24 hours. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed, sync, sync-run history, review, quality, and feed governance API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits, per-feed error isolation, JSON scheduler output, `source_sync_runs` logging, and source health summaries. Source list/detail responses include health fields such as status, last success, last error, success rate, articles in the last 24 hours, review status, and quality score. Feed statuses can be `active`, `paused`, `quarantined`, or `disabled`; only active RSS feeds are ingested. Source review statuses can be `needs_review`, `reviewed`, `quarantined`, or `disabled`; quarantined/disabled sources are skipped by ingestion. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Recurring ingestion scheduler:
 
@@ -218,7 +231,8 @@ Phase 2 implementation status:
 - Production hardening 2 complete: source seed/sync API routes require `X-Parallax-Admin-Key` backed by `ADMIN_API_KEY`.
 - Production hardening 3 complete: `scripts/check_deploy_readiness.py` validates production configuration and CI emits deploy-readiness JSON.
 - Production hardening 4 complete: `source_sync_runs`, sync-run endpoints, source health summaries, scheduler JSON run IDs, and smoke coverage make ingestion observable.
-- Next work should harden production data quality review and source compliance workflow.
+- Production hardening 5 complete: source review status, quality scoring, review queue, feed pause/quarantine/disable controls, and ingestion skip behavior make source governance manageable.
+- Next work should add external retrieval provider wiring and production alerting around ingestion health.
 
 Production deploy checklist:
 

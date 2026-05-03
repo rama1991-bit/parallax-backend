@@ -180,6 +180,98 @@ def main() -> int:
     ).json()["feed"]
     assert rss_feed["feed_type"] == "rss", rss_feed
 
+    denied_source_review = client.post(
+        f"/api/v1/sources/{source['id']}/review",
+        headers=headers,
+        json={"review_status": "reviewed"},
+    )
+    assert denied_source_review.status_code == 403, denied_source_review.text
+    reviewed_source = _assert_ok(
+        client.post(
+            f"/api/v1/sources/{source['id']}/review",
+            headers=admin_headers,
+            json={
+                "review_status": "reviewed",
+                "review_notes": "Smoke reviewed source metadata and feed terms.",
+                "terms_reviewed": True,
+            },
+        ),
+        "sources/review",
+    ).json()
+    assert reviewed_source["source"]["review_status"] == "reviewed", reviewed_source
+    assert reviewed_source["quality"]["review_status"] == "reviewed", reviewed_source
+
+    review_queue = _assert_ok(
+        client.get("/api/v1/sources/needs-review", headers=admin_headers),
+        "sources/needs-review",
+    ).json()
+    assert review_queue["summary"]["source_count"] >= 1, review_queue
+    denied_review_queue = client.get("/api/v1/sources/needs-review", headers=headers)
+    assert denied_review_queue.status_code == 403, denied_review_queue.text
+
+    quarantined_feed = _assert_ok(
+        client.post(
+            f"/api/v1/sources/feeds/{rss_feed['id']}/status",
+            headers=admin_headers,
+            json={
+                "status": "quarantined",
+                "disabled_reason": "Smoke test quarantine before ingestion.",
+                "review_notes": "Feed should be skipped while quarantined.",
+            },
+        ),
+        "sources/feed-quarantine",
+    ).json()["feed"]
+    assert quarantined_feed["status"] == "quarantined", quarantined_feed
+    quarantined_sync = _assert_ok(
+        client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
+        "sources/sync-quarantined-feed",
+    ).json()
+    assert quarantined_sync["status"] == "skipped", quarantined_sync
+    assert quarantined_sync["rss_feed_count"] == 0, quarantined_sync
+    reactivated_feed = _assert_ok(
+        client.post(
+            f"/api/v1/sources/feeds/{rss_feed['id']}/status",
+            headers=admin_headers,
+            json={"status": "active", "review_notes": "Feed re-enabled after smoke quarantine."},
+        ),
+        "sources/feed-reactivate",
+    ).json()["feed"]
+    assert reactivated_feed["status"] == "active", reactivated_feed
+
+    disabled_source_payload = _assert_ok(
+        client.post(
+            "/api/v1/sources",
+            json={
+                "name": "Disabled Governance Wire",
+                "website_url": "https://disabled.example.com",
+                "rss_url": "https://disabled.example.com/rss.xml",
+                "country": "United States",
+                "language": "English",
+                "source_type": "independent",
+            },
+        ),
+        "sources/create-disabled-fixture",
+    ).json()
+    disabled_source = disabled_source_payload["source"]
+    disabled_review = _assert_ok(
+        client.post(
+            f"/api/v1/sources/{disabled_source['id']}/review",
+            headers=admin_headers,
+            json={
+                "review_status": "disabled",
+                "disabled_reason": "Smoke test source-level ingestion skip.",
+            },
+        ),
+        "sources/disable-source",
+    ).json()
+    assert disabled_review["source"]["review_status"] == "disabled", disabled_review
+    disabled_sync = _assert_ok(
+        client.post(f"/api/v1/sources/{disabled_source['id']}/sync", headers=admin_headers),
+        "sources/sync-disabled-source",
+    ).json()
+    assert disabled_sync["status"] == "skipped", disabled_sync
+    assert "disabled" in disabled_sync["skipped_reason"], disabled_sync
+
     original_parse_rss_feed = source_sync_service.parse_rss_feed
 
     async def fake_parse_rss_feed(url: str, limit: int = 20):
@@ -375,9 +467,12 @@ def main() -> int:
     source_record = next(item for item in phase2_sources if item["id"] == source["id"])
     assert source_record["health"]["status"] == "healthy", source_record
     assert source_record["health"]["articles_24h"] >= 1, source_record
+    assert source_record["review_status"] == "reviewed", source_record
+    assert source_record["quality_score"] >= 0, source_record
     source_detail = _assert_ok(client.get(f"/api/v1/sources/{source['id']}"), "sources/detail").json()
     assert source_detail["source"]["article_count"] == 1, source_detail
     assert source_detail["health"]["status"] == "healthy", source_detail
+    assert source_detail["quality"]["quality_score"] >= 0.55, source_detail
     assert source_detail["sync_runs"], source_detail
     assert any(feed["feed_type"] == "homepage" for feed in source_detail["feeds"]), source_detail
     assert any(feed["feed_type"] == "rss" for feed in source_detail["feeds"]), source_detail

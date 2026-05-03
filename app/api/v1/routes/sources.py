@@ -13,6 +13,7 @@ from app.services.feed.store import (
     build_article_node_graph,
     build_ingested_article_detail,
     build_source_health_summary,
+    calculate_source_quality_report,
     create_source_feed_record,
     create_source_record,
     get_ingested_article_record,
@@ -20,7 +21,11 @@ from app.services.feed.store import (
     list_ingested_article_records,
     list_source_feed_records,
     list_source_records,
+    list_sources_needing_review,
     list_source_sync_runs,
+    recalculate_source_quality,
+    update_source_feed_governance,
+    update_source_review_status,
 )
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
@@ -51,6 +56,19 @@ class SourceFeedCreate(BaseModel):
     country: str | None = None
     status: str = "active"
     fetch_interval_minutes: int = 60
+
+
+class SourceReviewUpdate(BaseModel):
+    review_status: Literal["needs_review", "reviewed", "quarantined", "disabled"]
+    review_notes: str | None = None
+    disabled_reason: str | None = None
+    terms_reviewed: bool = False
+
+
+class SourceFeedGovernanceUpdate(BaseModel):
+    status: Literal["active", "paused", "quarantined", "disabled"]
+    disabled_reason: str | None = None
+    review_notes: str | None = None
 
 
 def _url(value: HttpUrl | None) -> str | None:
@@ -188,6 +206,36 @@ async def list_source_sync_history(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/needs-review")
+async def list_source_review_queue(
+    limit: int = Query(default=50, ge=1, le=250),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return list_sources_needing_review(limit=limit)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/feeds/{feed_id}/status")
+async def update_source_feed_status(
+    feed_id: str,
+    payload: SourceFeedGovernanceUpdate,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return update_source_feed_governance(
+            feed_id,
+            status=payload.status,
+            disabled_reason=payload.disabled_reason,
+            review_notes=payload.review_notes,
+        )
+    except FeedStoreError as exc:
+        if str(exc) == "Source feed not found.":
+            raise HTTPException(status_code=404, detail="Source feed not found") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/articles/{article_id}")
 async def get_ingested_article(
     article_id: str,
@@ -247,6 +295,7 @@ async def get_source(source_id: str, article_limit: int = Query(default=20, ge=1
             "feeds": list_source_feed_records(source_id=source_id),
             "articles": list_ingested_article_records(source_id=source_id, limit=article_limit),
             "health": build_source_health_summary(source_id),
+            "quality": calculate_source_quality_report(source_id),
             "sync_runs": list_source_sync_runs(source_id=source_id, limit=10),
         }
     except HTTPException:
@@ -306,6 +355,39 @@ async def list_single_source_sync_history(
     except HTTPException:
         raise
     except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{source_id}/review")
+async def update_source_review(
+    source_id: str,
+    payload: SourceReviewUpdate,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return update_source_review_status(
+            source_id,
+            review_status=payload.review_status,
+            review_notes=payload.review_notes,
+            disabled_reason=payload.disabled_reason,
+            terms_reviewed=payload.terms_reviewed,
+        )
+    except FeedStoreError as exc:
+        if str(exc) == "Source not found.":
+            raise HTTPException(status_code=404, detail="Source not found") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{source_id}/quality/recalculate")
+async def recalculate_source_quality_score(
+    source_id: str,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return recalculate_source_quality(source_id)
+    except FeedStoreError as exc:
+        if str(exc) == "Source not found.":
+            raise HTTPException(status_code=404, detail="Source not found") from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

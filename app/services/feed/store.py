@@ -65,6 +65,8 @@ _SOURCE_TYPES = {
 _SOURCE_FEED_TYPES = {"rss", "homepage", "manual"}
 _SOURCE_SYNC_SCOPES = {"source", "active_sources", "feed"}
 _SOURCE_SYNC_STATUSES = {"completed", "partial", "failed", "skipped"}
+_SOURCE_REVIEW_STATUSES = {"needs_review", "reviewed", "quarantined", "disabled"}
+_SOURCE_FEED_STATUSES = {"active", "paused", "quarantined", "disabled"}
 
 
 def now_iso():
@@ -256,6 +258,12 @@ def _ensure_schema():
                         credibility_notes text,
                         notes text,
                         is_default boolean not null default false,
+                        review_status text not null default 'needs_review',
+                        review_notes text,
+                        disabled_reason text,
+                        quality_score double precision not null default 0,
+                        terms_reviewed_at timestamptz,
+                        last_reviewed_at timestamptz,
                         created_at timestamptz not null default now(),
                         updated_at timestamptz not null default now()
                     );
@@ -273,6 +281,9 @@ def _ensure_schema():
                         last_checked_at timestamptz,
                         last_success_at timestamptz,
                         last_error text,
+                        disabled_reason text,
+                        review_notes text,
+                        last_reviewed_at timestamptz,
                         created_at timestamptz not null default now(),
                         updated_at timestamptz not null default now()
                     );
@@ -447,6 +458,15 @@ def _ensure_schema():
                     "alter table public.feed_items add column if not exists published_at timestamptz;",
                     "alter table public.feed_items add column if not exists raw jsonb not null default '{}'::jsonb;",
                     "alter table public.feed_items add column if not exists created_at timestamptz not null default now();",
+                    "alter table public.sources add column if not exists review_status text not null default 'needs_review';",
+                    "alter table public.sources add column if not exists review_notes text;",
+                    "alter table public.sources add column if not exists disabled_reason text;",
+                    "alter table public.sources add column if not exists quality_score double precision not null default 0;",
+                    "alter table public.sources add column if not exists terms_reviewed_at timestamptz;",
+                    "alter table public.sources add column if not exists last_reviewed_at timestamptz;",
+                    "alter table public.source_feeds add column if not exists disabled_reason text;",
+                    "alter table public.source_feeds add column if not exists review_notes text;",
+                    "alter table public.source_feeds add column if not exists last_reviewed_at timestamptz;",
                     """
                     create index if not exists idx_feed_cards_visible_created
                     on public.feed_cards (session_id, is_dismissed, created_at desc);
@@ -513,8 +533,20 @@ def _ensure_schema():
                     on public.sources (country, language);
                     """,
                     """
+                    create index if not exists idx_sources_review_status
+                    on public.sources (review_status);
+                    """,
+                    """
+                    create index if not exists idx_sources_quality_score
+                    on public.sources (quality_score);
+                    """,
+                    """
                     create index if not exists idx_source_feeds_source_status
                     on public.source_feeds (source_id, status);
+                    """,
+                    """
+                    create index if not exists idx_source_feeds_status
+                    on public.source_feeds (status);
                     """,
                     """
                     create unique index if not exists idx_source_feeds_source_url_unique
@@ -1320,6 +1352,23 @@ def _normalize_source_feed_type(value: str | None) -> str:
     return clean if clean in _SOURCE_FEED_TYPES else "rss"
 
 
+def _normalize_source_review_status(value: str | None) -> str:
+    clean = _clean_text(value, 40)
+    return clean if clean in _SOURCE_REVIEW_STATUSES else "needs_review"
+
+
+def _normalize_source_feed_status(value: str | None) -> str:
+    clean = _clean_text(value, 40)
+    return clean if clean in _SOURCE_FEED_STATUSES else "active"
+
+
+def _row_optional_datetime(row: dict, key: str) -> str | None:
+    value = row.get(key)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def _row_to_source_record(row: dict) -> dict:
     return {
         "id": str(row.get("id")),
@@ -1335,6 +1384,12 @@ def _row_to_source_record(row: dict) -> dict:
         "credibility_notes": row.get("credibility_notes"),
         "notes": row.get("notes"),
         "is_default": bool(row.get("is_default")),
+        "review_status": row.get("review_status") or "needs_review",
+        "review_notes": row.get("review_notes"),
+        "disabled_reason": row.get("disabled_reason"),
+        "quality_score": _as_float(row.get("quality_score"), 0.0),
+        "terms_reviewed_at": _row_optional_datetime(row, "terms_reviewed_at"),
+        "last_reviewed_at": _row_optional_datetime(row, "last_reviewed_at"),
         "feed_count": int(row.get("feed_count") or 0),
         "article_count": int(row.get("article_count") or 0),
         "created_at": _row_created_at(row),
@@ -1363,6 +1418,9 @@ def _row_to_source_feed_record(row: dict) -> dict:
         "last_checked_at": last_checked_at,
         "last_success_at": last_success_at,
         "last_error": row.get("last_error"),
+        "disabled_reason": row.get("disabled_reason"),
+        "review_notes": row.get("review_notes"),
+        "last_reviewed_at": _row_optional_datetime(row, "last_reviewed_at"),
         "created_at": _row_created_at(row),
         "updated_at": _row_created_at({"created_at": row.get("updated_at") or row.get("created_at")}),
     }
@@ -1485,6 +1543,12 @@ def create_source_record(
         "credibility_notes": _clean_text(credibility_notes, 1000),
         "notes": _clean_text(notes, 1000),
         "is_default": bool(is_default),
+        "review_status": "needs_review",
+        "review_notes": None,
+        "disabled_reason": None,
+        "quality_score": 0.0,
+        "terms_reviewed_at": None,
+        "last_reviewed_at": None,
     }
 
     if not database_enabled():
@@ -1494,9 +1558,9 @@ def create_source_record(
         now = now_iso()
         source = {
             "id": str(uuid4()),
-            **clean_source,
-            "feed_count": 0,
-            "article_count": 0,
+                        **clean_source,
+                        "feed_count": 0,
+                        "article_count": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -1533,10 +1597,11 @@ def create_source_record(
                     insert into public.sources (
                         id, name, website_url, rss_url, country, language, region,
                         political_context, source_size, source_type, credibility_notes,
-                        notes, is_default, created_at, updated_at
+                        notes, is_default, review_status, review_notes, disabled_reason,
+                        quality_score, terms_reviewed_at, last_reviewed_at, created_at, updated_at
                     )
                     values (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()
                     )
                     returning *, 0 as feed_count, 0 as article_count;
                     """,
@@ -1554,6 +1619,12 @@ def create_source_record(
                         clean_source["credibility_notes"],
                         clean_source["notes"],
                         clean_source["is_default"],
+                        clean_source["review_status"],
+                        clean_source["review_notes"],
+                        clean_source["disabled_reason"],
+                        clean_source["quality_score"],
+                        clean_source["terms_reviewed_at"],
+                        clean_source["last_reviewed_at"],
                     ),
                 )
                 return _row_to_source_record(cur.fetchone())
@@ -1676,7 +1747,7 @@ def create_source_feed_record(
     clean_title = _clean_text(title, 180)
     clean_language = _clean_text(language, 80)
     clean_country = _clean_text(country, 80)
-    clean_status = _clean_text(status, 40) or "active"
+    clean_status = _normalize_source_feed_status(status)
     interval = max(15, min(int(fetch_interval_minutes or 60), 1440))
 
     if not database_enabled():
@@ -1710,6 +1781,9 @@ def create_source_feed_record(
             "last_checked_at": None,
             "last_success_at": None,
             "last_error": None,
+            "disabled_reason": None,
+            "review_notes": None,
+            "last_reviewed_at": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -2119,14 +2193,19 @@ def _source_health_from_parts(
     last_success_at = last_success_at_dt.isoformat() if last_success_at_dt else None
     latest_error, latest_error_at = _latest_feed_error(feeds)
     run_count = len(runs)
+    rate_runs = [
+        run
+        for run in runs
+        if run.get("status") != "skipped" or int(run.get("feed_count") or 0) > 0
+    ]
     successful_runs = len(
         [
             run
-            for run in runs
+            for run in rate_runs
             if run.get("status") == "completed" and int(run.get("error_count") or 0) == 0
         ]
     )
-    success_rate = round(successful_runs / run_count, 3) if run_count else None
+    success_rate = round(successful_runs / len(rate_runs), 3) if rate_runs else None
     last_run = runs[0] if runs else None
 
     status = "healthy"
@@ -2316,6 +2395,336 @@ def attach_sources_health(sources: list[dict]) -> list[dict]:
         return enriched_sources
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not attach source health summaries: {exc}") from exc
+
+
+def _metadata_completeness(source: dict) -> tuple[float, list[str]]:
+    checks = [
+        ("website_url", "website URL"),
+        ("country", "country"),
+        ("language", "language"),
+        ("region", "region"),
+        ("source_size", "source size"),
+        ("source_type", "source type"),
+        ("credibility_notes", "credibility notes"),
+    ]
+    present = [label for key, label in checks if source.get(key)]
+    return round(len(present) / len(checks), 3), present
+
+
+def calculate_source_quality_report(source_id: str) -> dict:
+    source = get_source_record(source_id)
+    if not source:
+        raise FeedStoreError("Source not found.")
+
+    feeds = list_source_feed_records(source_id=source_id)
+    health = build_source_health_summary(source_id)
+    metadata_score, present_metadata = _metadata_completeness(source)
+    active_feeds = [feed for feed in feeds if feed.get("status") == "active"]
+    disabled_feeds = [feed for feed in feeds if feed.get("status") in {"quarantined", "disabled"}]
+    success_rate = health.get("success_rate")
+
+    score = 0.0
+    factors = []
+    risks = []
+
+    score += 0.35 * metadata_score
+    if present_metadata:
+        factors.append(f"Metadata present: {', '.join(present_metadata[:5])}.")
+    else:
+        risks.append("No useful source metadata has been reviewed.")
+
+    if source.get("rss_url") or active_feeds:
+        score += 0.18
+        factors.append("At least one active RSS feed is configured.")
+    elif feeds:
+        score += 0.06
+        risks.append("Feeds exist but none are active.")
+    else:
+        risks.append("No feed is configured for recurring ingestion.")
+
+    if success_rate is None:
+        score += 0.06
+        risks.append("No successful sync history has been recorded yet.")
+    else:
+        score += 0.22 * max(0.0, min(success_rate, 1.0))
+        factors.append(f"Recent sync success rate is {round(success_rate * 100)}%.")
+
+    if health.get("articles_24h", 0) > 0:
+        score += 0.1
+        factors.append("The source produced articles in the last 24 hours.")
+    elif health.get("article_count", 0) > 0:
+        score += 0.05
+        factors.append("The source has historical ingested articles.")
+    else:
+        risks.append("No articles have been ingested from this source.")
+
+    if source.get("terms_reviewed_at"):
+        score += 0.08
+        factors.append("Terms/feed review has been marked complete.")
+    else:
+        risks.append("Terms/feed usage has not been marked reviewed.")
+
+    if health.get("last_error"):
+        score -= 0.08
+        risks.append("The latest feed sync reported an error.")
+    if disabled_feeds:
+        score -= 0.08
+        risks.append(f"{len(disabled_feeds)} feed(s) are quarantined or disabled.")
+    if source.get("review_status") in {"quarantined", "disabled"}:
+        score = min(score, 0.25)
+        risks.append(f"Source review status is {source.get('review_status')}.")
+    elif source.get("review_status") == "reviewed":
+        score += 0.07
+        factors.append("An admin marked the source reviewed.")
+
+    score = round(max(0.0, min(score, 1.0)), 3)
+    if score >= 0.8:
+        grade = "high"
+    elif score >= 0.55:
+        grade = "medium"
+    elif score >= 0.35:
+        grade = "low"
+    else:
+        grade = "poor"
+
+    needs_review = (
+        source.get("review_status") != "reviewed"
+        or score < 0.55
+        or health.get("status") != "healthy"
+        or bool(disabled_feeds)
+    )
+    return {
+        "source_id": source_id,
+        "quality_score": score,
+        "quality_grade": grade,
+        "needs_review": needs_review,
+        "review_status": source.get("review_status") or "needs_review",
+        "metadata_completeness": metadata_score,
+        "feed_count": len(feeds),
+        "active_feed_count": len(active_feeds),
+        "disabled_feed_count": len(disabled_feeds),
+        "health_status": health.get("status"),
+        "factors": factors,
+        "risks": risks,
+        "recommendation": (
+            "Review metadata and feed terms before broad ingestion."
+            if needs_review
+            else "Source is reviewed and operationally ready for scheduled ingestion."
+        ),
+    }
+
+
+def _source_with_quality(source: dict) -> dict:
+    enriched = attach_source_health(source)
+    try:
+        enriched["quality"] = calculate_source_quality_report(source["id"])
+    except FeedStoreError:
+        enriched["quality"] = {
+            "source_id": source.get("id"),
+            "quality_score": _as_float(source.get("quality_score"), 0.0),
+            "quality_grade": "poor",
+            "needs_review": True,
+            "review_status": source.get("review_status") or "needs_review",
+            "metadata_completeness": 0.0,
+            "feed_count": source.get("feed_count") or 0,
+            "active_feed_count": 0,
+            "disabled_feed_count": 0,
+            "health_status": "needs_review",
+            "factors": [],
+            "risks": ["Quality report could not be calculated."],
+            "recommendation": "Review this source manually.",
+        }
+    return enriched
+
+
+def recalculate_source_quality(source_id: str) -> dict:
+    source = get_source_record(source_id)
+    if not source:
+        raise FeedStoreError("Source not found.")
+    quality = calculate_source_quality_report(source_id)
+    now = now_iso()
+
+    if not database_enabled():
+        for item in SOURCES:
+            if item.get("id") == source_id:
+                item["quality_score"] = quality["quality_score"]
+                item["updated_at"] = now
+                source = _source_with_memory_counts(item)
+                break
+        return {"source": _source_with_quality(source), "quality": quality}
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    update public.sources
+                    set quality_score = %s, updated_at = now()
+                    where id::text = %s
+                    returning *, 0 as feed_count, 0 as article_count;
+                    """,
+                    (quality["quality_score"], source_id),
+                )
+                row = cur.fetchone()
+        return {"source": _source_with_quality(_row_to_source_record(row)), "quality": quality}
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not update source quality score: {exc}") from exc
+
+
+def update_source_review_status(
+    source_id: str,
+    review_status: str,
+    review_notes: str | None = None,
+    disabled_reason: str | None = None,
+    terms_reviewed: bool = False,
+) -> dict:
+    source = get_source_record(source_id)
+    if not source:
+        raise FeedStoreError("Source not found.")
+    clean_status = _normalize_source_review_status(review_status)
+    clean_notes = _clean_text(review_notes, 1000)
+    clean_reason = _clean_text(disabled_reason, 1000)
+    now = now_iso()
+
+    if not database_enabled():
+        for item in SOURCES:
+            if item.get("id") != source_id:
+                continue
+            item["review_status"] = clean_status
+            item["review_notes"] = clean_notes
+            item["disabled_reason"] = clean_reason if clean_status in {"quarantined", "disabled"} else None
+            if terms_reviewed:
+                item["terms_reviewed_at"] = now
+            item["last_reviewed_at"] = now
+            item["updated_at"] = now
+            break
+        return recalculate_source_quality(source_id)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update public.sources
+                    set
+                        review_status = %s,
+                        review_notes = %s,
+                        disabled_reason = case when %s in ('quarantined', 'disabled') then %s else null end,
+                        terms_reviewed_at = case when %s then now() else terms_reviewed_at end,
+                        last_reviewed_at = now(),
+                        updated_at = now()
+                    where id::text = %s;
+                    """,
+                    (
+                        clean_status,
+                        clean_notes,
+                        clean_status,
+                        clean_reason,
+                        terms_reviewed,
+                        source_id,
+                    ),
+                )
+        return recalculate_source_quality(source_id)
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not update source review status: {exc}") from exc
+
+
+def update_source_feed_governance(
+    source_feed_id: str,
+    status: str,
+    disabled_reason: str | None = None,
+    review_notes: str | None = None,
+) -> dict:
+    clean_status = _normalize_source_feed_status(status)
+    clean_reason = _clean_text(disabled_reason, 1000)
+    clean_notes = _clean_text(review_notes, 1000)
+    now = now_iso()
+
+    if not database_enabled():
+        for feed in SOURCE_FEEDS:
+            if feed.get("id") != source_feed_id:
+                continue
+            feed["status"] = clean_status
+            feed["disabled_reason"] = (
+                clean_reason if clean_status in {"paused", "quarantined", "disabled"} else None
+            )
+            feed["review_notes"] = clean_notes
+            feed["last_reviewed_at"] = now
+            feed["updated_at"] = now
+            source_id = feed.get("source_id")
+            quality = recalculate_source_quality(source_id) if source_id else None
+            return {"feed": feed, "source_quality": (quality or {}).get("quality")}
+        raise FeedStoreError("Source feed not found.")
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    update public.source_feeds
+                    set
+                        status = %s,
+                        disabled_reason = case when %s in ('paused', 'quarantined', 'disabled') then %s else null end,
+                        review_notes = %s,
+                        last_reviewed_at = now(),
+                        updated_at = now()
+                    where id::text = %s
+                    returning *;
+                    """,
+                    (
+                        clean_status,
+                        clean_status,
+                        clean_reason,
+                        clean_notes,
+                        source_feed_id,
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise FeedStoreError("Source feed not found.")
+                feed = _row_to_source_feed_record(row)
+        quality = recalculate_source_quality(feed["source_id"]) if feed.get("source_id") else None
+        return {"feed": feed, "source_quality": (quality or {}).get("quality")}
+    except FeedStoreError:
+        raise
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not update source feed governance: {exc}") from exc
+
+
+def list_sources_needing_review(limit: int = 50) -> dict:
+    sources = list_source_records(limit=max(1, min(limit, 250)))
+    reviewed = []
+    for source in sources:
+        enriched = _source_with_quality(source)
+        quality = enriched.get("quality") or {}
+        health = enriched.get("health") or {}
+        if (
+            quality.get("needs_review")
+            or source.get("review_status") != "reviewed"
+            or health.get("status") != "healthy"
+        ):
+            reviewed.append(enriched)
+        if len(reviewed) >= limit:
+            break
+
+    return {
+        "sources": reviewed,
+        "summary": {
+            "source_count": len(reviewed),
+            "disabled_count": len([item for item in reviewed if item.get("review_status") == "disabled"]),
+            "quarantined_count": len([item for item in reviewed if item.get("review_status") == "quarantined"]),
+            "low_quality_count": len(
+                [
+                    item
+                    for item in reviewed
+                    if (item.get("quality") or {}).get("quality_score", 0) < 0.55
+                ]
+            ),
+        },
+    }
 
 
 def _article_keyword_tokens(*values: str | None) -> list[str]:
