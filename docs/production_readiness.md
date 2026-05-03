@@ -13,6 +13,7 @@ The current product surface is backed by these persisted tables:
 - `sources`
 - `source_feeds`
 - `ingested_articles`
+- `source_sync_runs`
 - `nodes`
 - `node_edges`
 - `article_comparisons`
@@ -36,7 +37,7 @@ These frontend surfaces have real backend support:
 - `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze` by URL or `ingested_article_id`
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
-- `/sources`: `GET/POST /api/v1/sources`, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
+- `/sources`: `GET/POST /api/v1/sources`, source health summaries, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, admin-key-protected sync-run history, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
 - `/compare`: `POST /api/v1/compare`, `GET /api/v1/compare/{article_id}`
 - `/notifications`: `GET /api/v1/alerts`, read/read-all/unread count
 - `/reports/{id}`: report detail, save/unsave, JSON/Markdown export
@@ -57,6 +58,7 @@ Known MVP gaps:
 - Phase 2 source ingestion, default source seeds, ingested-article analysis linkage, hydrated article detail, feed card hydration, article-id compare, node-based article detail, and bounded OSINT panels exist.
 - Default source metadata is intentionally conservative and should be reviewed for legal/feed-term compliance before production-scale ingestion.
 - Active RSS ingestion can be scheduled with `POST /api/v1/sources/sync-active` or `python scripts/sync_active_sources.py`.
+- Source ingestion now records `source_sync_runs` and exposes source health summaries; treat these as operational signals, not editorial quality judgments.
 
 ## Deploy Readiness
 
@@ -84,6 +86,8 @@ python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --artic
 
 Run it every 15 minutes once the backend has migrations applied and the default source database has been reviewed. The script isolates feed-level failures so one broken feed does not stop the whole batch. Keep conservative limits in production until source quality, hosting quotas, and upstream feed behavior are understood.
 
+The scheduler output is JSON and includes `sync_run_id`, status, feed/article/card counts, error count, and the applied limits. A non-zero exit is reserved for runs that have errors and no saved articles, so hosted schedulers can flag fully failed batches without paging on partial successes.
+
 HTTP scheduler alternative:
 
 ```bash
@@ -92,6 +96,36 @@ curl -X POST https://your-backend.example.com/api/v1/sources/sync-active \
 ```
 
 Use the HTTP route when the hosting platform supports scheduled HTTP calls but not scheduled shell commands.
+
+## Ingestion Observability
+
+Read source health from the public source list/detail payloads:
+
+```bash
+curl https://your-backend.example.com/api/v1/sources
+curl https://your-backend.example.com/api/v1/sources/<source_id>
+```
+
+Read detailed sync history with the admin key:
+
+```bash
+curl https://your-backend.example.com/api/v1/sources/sync-runs \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+
+curl https://your-backend.example.com/api/v1/sources/<source_id>/sync-runs \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+```
+
+Watch these fields after deploy:
+
+- `health.status`: `healthy`, `stale`, `error`, or `needs_review`
+- `health.last_success_at`
+- `health.last_error`
+- `health.success_rate`
+- `health.articles_24h`
+- `sync_runs.error_count`
+
+Initial alert candidates: no successful source sync in 24 hours, repeated `error` status, `success_rate` below 50% after several runs, or zero `articles_24h` for high-priority active sources.
 
 ## Smoke
 
@@ -107,7 +141,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed and sync, default source seed preview/import, active source sync, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed, sync, and sync-run history, default source seed preview/import, active source sync, sync-run persistence, source health summaries, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 

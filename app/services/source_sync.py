@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.core.session import ANONYMOUS_SESSION_ID
 from app.services.feed.store import (
     FeedStoreError,
     get_source_record,
     list_source_feed_records,
     list_source_records,
+    record_source_sync_run,
     save_ingested_articles,
     update_source_feed_sync_result,
 )
@@ -20,6 +23,23 @@ def _clamp(value: int | None, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(raw, maximum))
 
 
+def _sync_status(feed_count: int, synced_feed_count: int, error_count: int) -> str:
+    if not feed_count:
+        return "skipped"
+    if error_count and synced_feed_count:
+        return "partial"
+    if error_count:
+        return "failed"
+    return "completed"
+
+
+def _safe_record_sync_run(**kwargs) -> dict | None:
+    try:
+        return record_source_sync_run(**kwargs)
+    except FeedStoreError:
+        return None
+
+
 async def sync_source_feeds(
     source_id: str,
     session_id: str = ANONYMOUS_SESSION_ID,
@@ -27,6 +47,7 @@ async def sync_source_feeds(
     card_limit: int = 10,
     feed_limit: int = 25,
 ) -> dict:
+    started_at = datetime.now(timezone.utc)
     source = get_source_record(source_id)
     if not source:
         raise FeedStoreError("Source not found.")
@@ -78,8 +99,43 @@ async def sync_source_feeds(
                 }
             )
 
-    return {
+    status = _sync_status(len(rss_feeds), len(synced_feeds), len(errors))
+    limits = {
+        "article_limit_per_feed": max_articles,
+        "card_limit": max_cards,
+        "feed_limit": max_feeds,
+    }
+    summary = {
+        "source_id": source_id,
+        "source_name": source.get("name"),
+        "rss_feed_count": len(rss_feeds),
+        "synced_feed_count": len(synced_feeds),
+        "article_count": len(articles),
+        "card_count": len(cards),
+        "error_count": len(errors),
+    }
+    run = _safe_record_sync_run(
+        sync_scope="source",
+        status=status,
+        session_id=session_id,
+        source_id=source_id,
+        source_name=source.get("name"),
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        source_count=1,
+        feed_count=len(rss_feeds),
+        synced_feed_count=len(synced_feeds),
+        article_count=len(articles),
+        card_count=len(cards),
+        error_count=len(errors),
+        limits=limits,
+        errors=errors,
+        summary=summary,
+    )
+
+    result = {
         "source": get_source_record(source_id) or source,
+        "status": status,
         "rss_feed_count": len(rss_feeds),
         "synced_feed_count": len(synced_feeds),
         "article_count": len(articles),
@@ -88,7 +144,14 @@ async def sync_source_feeds(
         "cards": cards,
         "synced_feeds": synced_feeds,
         "errors": errors,
+        "limits": limits,
     }
+    if run:
+        result["sync_run"] = run
+        result["sync_run_id"] = run["id"]
+    else:
+        result["sync_run_log_error"] = "Sync completed but run logging failed."
+    return result
 
 
 async def sync_active_source_feeds(
@@ -98,6 +161,7 @@ async def sync_active_source_feeds(
     article_limit: int = 10,
     card_limit: int = 25,
 ) -> dict:
+    started_at = datetime.now(timezone.utc)
     max_sources = _clamp(source_limit, default=50, minimum=1, maximum=250)
     max_feeds = _clamp(feed_limit, default=100, minimum=1, maximum=500)
     max_articles = _clamp(article_limit, default=10, minimum=1, maximum=50)
@@ -138,14 +202,48 @@ async def sync_active_source_feeds(
                 "article_count": result["article_count"],
                 "card_count": result["card_count"],
                 "error_count": len(result["errors"]),
+                "status": result.get("status"),
+                "sync_run_id": result.get("sync_run_id"),
             }
         )
 
-    return {
-        "status": "completed",
+    status = _sync_status(feed_count, sum(item["synced_feed_count"] for item in source_results), len(errors))
+    limits = {
+        "source_limit": max_sources,
+        "feed_limit": max_feeds,
+        "article_limit_per_feed": max_articles,
+        "card_limit": max_cards,
+    }
+    summary = {
         "source_count": len(source_results),
         "feed_count": feed_count,
         "synced_feed_count": sum(item["synced_feed_count"] for item in source_results),
+        "article_count": len(articles),
+        "card_count": len(cards),
+        "error_count": len(errors),
+    }
+    run = _safe_record_sync_run(
+        sync_scope="active_sources",
+        status=status,
+        session_id=session_id,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        source_count=len(source_results),
+        feed_count=feed_count,
+        synced_feed_count=summary["synced_feed_count"],
+        article_count=len(articles),
+        card_count=len(cards),
+        error_count=len(errors),
+        limits=limits,
+        errors=errors,
+        summary=summary,
+    )
+
+    result = {
+        "status": status,
+        "source_count": len(source_results),
+        "feed_count": feed_count,
+        "synced_feed_count": summary["synced_feed_count"],
         "article_count": len(articles),
         "card_count": len(cards),
         "error_count": len(errors),
@@ -153,10 +251,11 @@ async def sync_active_source_feeds(
         "articles": articles,
         "cards": cards,
         "errors": errors,
-        "limits": {
-            "source_limit": max_sources,
-            "feed_limit": max_feeds,
-            "article_limit_per_feed": max_articles,
-            "card_limit": max_cards,
-        },
+        "limits": limits,
     }
+    if run:
+        result["sync_run"] = run
+        result["sync_run_id"] = run["id"]
+    else:
+        result["sync_run_log_error"] = "Sync completed but run logging failed."
+    return result

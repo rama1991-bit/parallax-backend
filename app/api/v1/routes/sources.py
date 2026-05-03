@@ -8,8 +8,11 @@ from app.core.session import get_session_id
 from app.services.default_sources import preview_default_sources, seed_default_sources
 from app.services.feed.store import (
     FeedStoreError,
+    attach_source_health,
+    attach_sources_health,
     build_article_node_graph,
     build_ingested_article_detail,
+    build_source_health_summary,
     create_source_feed_record,
     create_source_record,
     get_ingested_article_record,
@@ -17,6 +20,7 @@ from app.services.feed.store import (
     list_ingested_article_records,
     list_source_feed_records,
     list_source_records,
+    list_source_sync_runs,
 )
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
@@ -62,14 +66,15 @@ async def list_sources(
     source_type: str | None = None,
 ):
     try:
+        sources = list_source_records(
+            limit=limit,
+            country=country,
+            language=language,
+            source_size=source_size,
+            source_type=source_type,
+        )
         return {
-            "sources": list_source_records(
-                limit=limit,
-                country=country,
-                language=language,
-                source_size=source_size,
-                source_type=source_type,
-            )
+            "sources": attach_sources_health(sources)
         }
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -170,6 +175,19 @@ async def sync_active_sources(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/sync-runs")
+async def list_source_sync_history(
+    limit: int = Query(default=50, ge=1, le=250),
+    source_id: str | None = None,
+    sync_scope: str | None = None,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return {"sync_runs": list_source_sync_runs(source_id=source_id, sync_scope=sync_scope, limit=limit)}
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/articles/{article_id}")
 async def get_ingested_article(
     article_id: str,
@@ -225,9 +243,11 @@ async def get_source(source_id: str, article_limit: int = Query(default=20, ge=1
         if not source:
             raise HTTPException(status_code=404, detail="Source not found")
         return {
-            "source": source,
+            "source": attach_source_health(source),
             "feeds": list_source_feed_records(source_id=source_id),
             "articles": list_ingested_article_records(source_id=source_id, limit=article_limit),
+            "health": build_source_health_summary(source_id),
+            "sync_runs": list_source_sync_runs(source_id=source_id, limit=10),
         }
     except HTTPException:
         raise
@@ -267,6 +287,22 @@ async def list_source_articles(
         if not get_source_record(source_id):
             raise HTTPException(status_code=404, detail="Source not found")
         return {"articles": list_ingested_article_records(source_id=source_id, limit=limit)}
+    except HTTPException:
+        raise
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/{source_id}/sync-runs")
+async def list_single_source_sync_history(
+    source_id: str,
+    limit: int = Query(default=25, ge=1, le=100),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        if not get_source_record(source_id):
+            raise HTTPException(status_code=404, detail="Source not found")
+        return {"sync_runs": list_source_sync_runs(source_id=source_id, limit=limit)}
     except HTTPException:
         raise
     except FeedStoreError as exc:

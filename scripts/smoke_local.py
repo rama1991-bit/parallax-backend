@@ -42,6 +42,7 @@ def _reset_memory_store() -> None:
         store.SOURCES,
         store.SOURCE_FEEDS,
         store.INGESTED_ARTICLES,
+        store.SOURCE_SYNC_RUNS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -143,6 +144,8 @@ def main() -> int:
         "sources/sync-no-rss",
     ).json()
     assert source_sync["rss_feed_count"] == 0, source_sync
+    assert source_sync["status"] == "skipped", source_sync
+    assert source_sync["sync_run_id"], source_sync
 
     default_preview = _assert_ok(client.get("/api/v1/sources/defaults/preview"), "sources/defaults-preview").json()
     assert default_preview["summary"]["source_count"] >= 40, default_preview
@@ -214,6 +217,7 @@ def main() -> int:
         assert active_sync["feed_count"] >= 1, active_sync
         assert active_sync["article_count"] >= 1, active_sync
         assert active_sync["card_count"] >= 1, active_sync
+        assert active_sync["sync_run_id"], active_sync
         ingested = _assert_ok(
             client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
             "sources/sync-rss",
@@ -223,7 +227,24 @@ def main() -> int:
 
     assert len(ingested["articles"]) == 1, ingested
     assert len(ingested["cards"]) == 1, ingested
+    assert ingested["status"] == "completed", ingested
+    assert ingested["sync_run_id"], ingested
     ingested_article_id = ingested["articles"][0]["id"]
+
+    sync_runs = _assert_ok(
+        client.get("/api/v1/sources/sync-runs", headers=admin_headers),
+        "sources/sync-runs",
+    ).json()["sync_runs"]
+    assert len(sync_runs) >= 3, sync_runs
+    assert any(run["sync_scope"] == "active_sources" for run in sync_runs), sync_runs
+    assert any(run["source_id"] == source["id"] for run in sync_runs), sync_runs
+    denied_sync_runs = client.get("/api/v1/sources/sync-runs", headers=headers)
+    assert denied_sync_runs.status_code == 403, denied_sync_runs.text
+    source_sync_runs = _assert_ok(
+        client.get(f"/api/v1/sources/{source['id']}/sync-runs", headers=admin_headers),
+        "sources/source-sync-runs",
+    ).json()["sync_runs"]
+    assert source_sync_runs and source_sync_runs[0]["source_id"] == source["id"], source_sync_runs
 
     original_fetch_article = analyze_route.fetch_article
 
@@ -351,8 +372,13 @@ def main() -> int:
     phase2_sources = _assert_ok(client.get("/api/v1/sources"), "sources/list").json()["sources"]
     assert any(item["id"] == source["id"] for item in phase2_sources), phase2_sources
     assert any(item["is_default"] for item in phase2_sources), phase2_sources
+    source_record = next(item for item in phase2_sources if item["id"] == source["id"])
+    assert source_record["health"]["status"] == "healthy", source_record
+    assert source_record["health"]["articles_24h"] >= 1, source_record
     source_detail = _assert_ok(client.get(f"/api/v1/sources/{source['id']}"), "sources/detail").json()
     assert source_detail["source"]["article_count"] == 1, source_detail
+    assert source_detail["health"]["status"] == "healthy", source_detail
+    assert source_detail["sync_runs"], source_detail
     assert any(feed["feed_type"] == "homepage" for feed in source_detail["feeds"]), source_detail
     assert any(feed["feed_type"] == "rss" for feed in source_detail["feeds"]), source_detail
     source_articles = _assert_ok(

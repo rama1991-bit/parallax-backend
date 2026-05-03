@@ -35,6 +35,7 @@ AUTHORS = []
 SOURCES = []
 SOURCE_FEEDS = []
 INGESTED_ARTICLES = []
+SOURCE_SYNC_RUNS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -62,6 +63,8 @@ _SOURCE_TYPES = {
     "official",
 }
 _SOURCE_FEED_TYPES = {"rss", "homepage", "manual"}
+_SOURCE_SYNC_SCOPES = {"source", "active_sources", "feed"}
+_SOURCE_SYNC_STATUSES = {"completed", "partial", "failed", "skipped"}
 
 
 def now_iso():
@@ -359,6 +362,33 @@ def _ensure_schema():
                         created_at timestamptz not null default now(),
                         updated_at timestamptz not null default now()
                     );
+
+                    create table if not exists public.source_sync_runs (
+                        id uuid primary key,
+                        session_id text,
+                        sync_scope text not null default 'source' check (
+                            sync_scope in ('source', 'active_sources', 'feed')
+                        ),
+                        status text not null default 'completed' check (
+                            status in ('completed', 'partial', 'failed', 'skipped')
+                        ),
+                        source_id uuid references public.sources(id) on delete set null,
+                        source_feed_id uuid references public.source_feeds(id) on delete set null,
+                        source_name text,
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        source_count integer not null default 0,
+                        feed_count integer not null default 0,
+                        synced_feed_count integer not null default 0,
+                        article_count integer not null default 0,
+                        card_count integer not null default 0,
+                        error_count integer not null default 0,
+                        limits jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
                     """
                 )
 
@@ -533,6 +563,42 @@ def _ensure_schema():
                     """
                     create index if not exists idx_feed_cards_ingested_article
                     on public.feed_cards (session_id, ingested_article_id);
+                    """,
+                    """
+                    create table if not exists public.source_sync_runs (
+                        id uuid primary key,
+                        session_id text,
+                        sync_scope text not null default 'source' check (
+                            sync_scope in ('source', 'active_sources', 'feed')
+                        ),
+                        status text not null default 'completed' check (
+                            status in ('completed', 'partial', 'failed', 'skipped')
+                        ),
+                        source_id uuid references public.sources(id) on delete set null,
+                        source_feed_id uuid references public.source_feeds(id) on delete set null,
+                        source_name text,
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        source_count integer not null default 0,
+                        feed_count integer not null default 0,
+                        synced_feed_count integer not null default 0,
+                        article_count integer not null default 0,
+                        card_count integer not null default 0,
+                        error_count integer not null default 0,
+                        limits jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create index if not exists idx_source_sync_runs_started
+                    on public.source_sync_runs (started_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_sync_runs_source_started
+                    on public.source_sync_runs (source_id, started_at desc);
                     """,
                 ]:
                     cur.execute(statement)
@@ -1790,6 +1856,466 @@ def update_source_feed_sync_result(
                 return _row_to_source_feed_record(row) if row else None
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not update source feed sync state: {exc}") from exc
+
+
+def _normalize_sync_scope(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "source"
+    return clean if clean in _SOURCE_SYNC_SCOPES else "source"
+
+
+def _normalize_sync_status(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "completed"
+    return clean if clean in _SOURCE_SYNC_STATUSES else "completed"
+
+
+def _datetime_iso(value) -> str | None:
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+    if not value:
+        return None
+    parsed = _parse_datetime(value)
+    return parsed.isoformat() if parsed else str(value)
+
+
+def _duration_ms(started_at, finished_at) -> int:
+    started = _parse_datetime(started_at)
+    finished = _parse_datetime(finished_at) or datetime.now(timezone.utc)
+    if not started:
+        return 0
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
+def _row_to_source_sync_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "sync_scope": row.get("sync_scope") or "source",
+        "status": row.get("status") or "completed",
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "source_name": row.get("source_name"),
+        "started_at": _datetime_iso(row.get("started_at")) or now_iso(),
+        "finished_at": _datetime_iso(row.get("finished_at")),
+        "duration_ms": int(row.get("duration_ms") or 0),
+        "source_count": int(row.get("source_count") or 0),
+        "feed_count": int(row.get("feed_count") or 0),
+        "synced_feed_count": int(row.get("synced_feed_count") or 0),
+        "article_count": int(row.get("article_count") or 0),
+        "card_count": int(row.get("card_count") or 0),
+        "error_count": int(row.get("error_count") or 0),
+        "limits": row.get("limits") or {},
+        "errors": row.get("errors") or [],
+        "summary": row.get("summary") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def record_source_sync_run(
+    *,
+    sync_scope: str = "source",
+    status: str = "completed",
+    session_id: str = ANONYMOUS_SESSION_ID,
+    source_id: str | None = None,
+    source_feed_id: str | None = None,
+    source_name: str | None = None,
+    started_at=None,
+    finished_at=None,
+    source_count: int = 0,
+    feed_count: int = 0,
+    synced_feed_count: int = 0,
+    article_count: int = 0,
+    card_count: int = 0,
+    error_count: int = 0,
+    limits: dict | None = None,
+    errors: list[dict] | None = None,
+    summary: dict | None = None,
+) -> dict:
+    sync_scope = _normalize_sync_scope(sync_scope)
+    status = _normalize_sync_status(status)
+    started = _parse_datetime(started_at) or datetime.now(timezone.utc)
+    finished = _parse_datetime(finished_at) or datetime.now(timezone.utc)
+    duration = _duration_ms(started, finished)
+    clean_source_name = _clean_text(source_name, 180)
+    run = {
+        "id": str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "sync_scope": sync_scope,
+        "status": status,
+        "source_id": source_id,
+        "source_feed_id": source_feed_id,
+        "source_name": clean_source_name,
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_ms": duration,
+        "source_count": max(0, int(source_count or 0)),
+        "feed_count": max(0, int(feed_count or 0)),
+        "synced_feed_count": max(0, int(synced_feed_count or 0)),
+        "article_count": max(0, int(article_count or 0)),
+        "card_count": max(0, int(card_count or 0)),
+        "error_count": max(0, int(error_count or 0)),
+        "limits": limits or {},
+        "errors": errors or [],
+        "summary": summary or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        SOURCE_SYNC_RUNS.insert(0, run)
+        return run
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_sync_runs (
+                        id, session_id, sync_scope, status, source_id, source_feed_id,
+                        source_name, started_at, finished_at, duration_ms, source_count,
+                        feed_count, synced_feed_count, article_count, card_count,
+                        error_count, limits, errors, summary, created_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, now()
+                    )
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["sync_scope"],
+                        run["status"],
+                        run["source_id"],
+                        run["source_feed_id"],
+                        run["source_name"],
+                        run["started_at"],
+                        run["finished_at"],
+                        run["duration_ms"],
+                        run["source_count"],
+                        run["feed_count"],
+                        run["synced_feed_count"],
+                        run["article_count"],
+                        run["card_count"],
+                        run["error_count"],
+                        Json(run["limits"]),
+                        Json(run["errors"]),
+                        Json(run["summary"]),
+                    ),
+                )
+                return _row_to_source_sync_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not record source sync run: {exc}") from exc
+
+
+def list_source_sync_runs(
+    source_id: str | None = None,
+    sync_scope: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 50), 250))
+    clean_scope = _clean_text(sync_scope, 40)
+
+    def matches(run: dict) -> bool:
+        return (
+            (not source_id or run.get("source_id") == source_id)
+            and (not clean_scope or run.get("sync_scope") == clean_scope)
+        )
+
+    if not database_enabled():
+        runs = [run for run in SOURCE_SYNC_RUNS if matches(run)]
+        return sorted(runs, key=lambda item: item.get("started_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if source_id:
+        where.append("source_id::text = %s")
+        params.append(source_id)
+    if clean_scope:
+        where.append("sync_scope = %s")
+        params.append(clean_scope)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_sync_runs
+                    {where_sql}
+                    order by started_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_sync_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source sync runs: {exc}") from exc
+
+
+def _article_counts_for_source(source_id: str) -> tuple[int, int]:
+    if not database_enabled():
+        now = datetime.now(timezone.utc)
+        source_articles = [
+            article for article in INGESTED_ARTICLES if article.get("source_id") == source_id
+        ]
+        recent_count = 0
+        for article in source_articles:
+            created_at = _parse_datetime(article.get("created_at"))
+            if created_at and (now - created_at).total_seconds() <= 86400:
+                recent_count += 1
+        return len(source_articles), recent_count
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select
+                        count(*) as article_count,
+                        count(*) filter (
+                            where created_at >= now() - interval '24 hours'
+                        ) as articles_24h
+                    from public.ingested_articles
+                    where source_id::text = %s;
+                    """,
+                    (source_id,),
+                )
+                row = cur.fetchone() or {}
+                return int(row.get("article_count") or 0), int(row.get("articles_24h") or 0)
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load source article health counts: {exc}") from exc
+
+
+def _latest_feed_error(feeds: list[dict]) -> tuple[str | None, datetime | None]:
+    latest_error = None
+    latest_error_at = None
+    for feed in feeds:
+        if not feed.get("last_error"):
+            continue
+        checked_at = _parse_datetime(feed.get("last_checked_at")) or _parse_datetime(feed.get("updated_at"))
+        if latest_error_at is None or (checked_at and checked_at > latest_error_at):
+            latest_error = feed.get("last_error")
+            latest_error_at = checked_at
+    return latest_error, latest_error_at
+
+
+def _source_health_from_parts(
+    source: dict,
+    feeds: list[dict],
+    runs: list[dict],
+    article_count: int,
+    articles_24h: int,
+) -> dict:
+    active_feeds = [feed for feed in feeds if feed.get("status") == "active"]
+    checked_values = [_parse_datetime(feed.get("last_checked_at")) for feed in feeds]
+    success_values = [_parse_datetime(feed.get("last_success_at")) for feed in feeds]
+    checked_values = [value for value in checked_values if value]
+    success_values = [value for value in success_values if value]
+    last_checked_at = max(checked_values).isoformat() if checked_values else None
+    last_success_at_dt = max(success_values) if success_values else None
+    last_success_at = last_success_at_dt.isoformat() if last_success_at_dt else None
+    latest_error, latest_error_at = _latest_feed_error(feeds)
+    run_count = len(runs)
+    successful_runs = len(
+        [
+            run
+            for run in runs
+            if run.get("status") == "completed" and int(run.get("error_count") or 0) == 0
+        ]
+    )
+    success_rate = round(successful_runs / run_count, 3) if run_count else None
+    last_run = runs[0] if runs else None
+
+    status = "healthy"
+    recommendation = "Source ingestion is producing recent successful sync signals."
+    now = datetime.now(timezone.utc)
+    max_interval = max([int(feed.get("fetch_interval_minutes") or 60) for feed in active_feeds] or [60])
+    stale_after_minutes = max(1440, max_interval * 2)
+    stale_feed = False
+    needs_review = False
+
+    if not active_feeds:
+        status = "needs_review"
+        needs_review = True
+        recommendation = "Add or activate at least one RSS feed before scheduling this source."
+    elif not last_success_at_dt:
+        status = "needs_review"
+        needs_review = True
+        recommendation = "Run a source sync and inspect feed parsing before relying on this source."
+    else:
+        age_minutes = (now - last_success_at_dt).total_seconds() / 60
+        stale_feed = age_minutes > stale_after_minutes
+        if latest_error and latest_error_at and latest_error_at >= last_success_at_dt:
+            status = "error"
+            recommendation = "Inspect the last feed error and verify that the source RSS URL still works."
+        elif stale_feed:
+            status = "stale"
+            recommendation = "The source has not produced a successful sync in the expected window."
+        elif success_rate is not None and run_count >= 3 and success_rate < 0.5:
+            status = "error"
+            recommendation = "Recent sync attempts are failing more often than succeeding."
+
+    return {
+        "status": status,
+        "label": {
+            "healthy": "Healthy",
+            "stale": "Stale",
+            "error": "Error",
+            "needs_review": "Needs review",
+        }.get(status, "Needs review"),
+        "feed_count": len(feeds),
+        "active_feed_count": len(active_feeds),
+        "article_count": article_count,
+        "articles_24h": articles_24h,
+        "run_count": run_count,
+        "success_rate": success_rate,
+        "last_checked_at": last_checked_at,
+        "last_success_at": last_success_at,
+        "last_error": latest_error,
+        "last_run": last_run,
+        "stale_feed": stale_feed,
+        "needs_review": needs_review,
+        "recommendation": recommendation,
+    }
+
+
+def build_source_health_summary(source_id: str) -> dict:
+    source = get_source_record(source_id)
+    if not source:
+        raise FeedStoreError("Source not found.")
+
+    feeds = list_source_feed_records(source_id=source_id)
+    runs = list_source_sync_runs(source_id=source_id, limit=20)
+    article_count, articles_24h = _article_counts_for_source(source_id)
+    return _source_health_from_parts(source, feeds, runs, article_count, articles_24h)
+
+
+def attach_source_health(source: dict) -> dict:
+    enriched = {**source}
+    try:
+        enriched["health"] = build_source_health_summary(source["id"])
+    except FeedStoreError:
+        enriched["health"] = {
+            "status": "needs_review",
+            "label": "Needs review",
+            "feed_count": source.get("feed_count") or 0,
+            "active_feed_count": 0,
+            "article_count": source.get("article_count") or 0,
+            "articles_24h": 0,
+            "run_count": 0,
+            "success_rate": None,
+            "last_checked_at": None,
+            "last_success_at": None,
+            "last_error": None,
+            "last_run": None,
+            "stale_feed": False,
+            "needs_review": True,
+            "recommendation": "Source health could not be calculated.",
+        }
+    return enriched
+
+
+def attach_sources_health(sources: list[dict]) -> list[dict]:
+    if not sources:
+        return []
+
+    if not database_enabled():
+        return [attach_source_health(source) for source in sources]
+
+    source_ids = [source["id"] for source in sources if source.get("id")]
+    if not source_ids:
+        return sources
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select *
+                    from public.source_feeds
+                    where source_id::text = any(%s)
+                    order by created_at desc;
+                    """,
+                    (source_ids,),
+                )
+                feeds_by_source: dict[str, list[dict]] = {}
+                for row in cur.fetchall():
+                    feed = _row_to_source_feed_record(row)
+                    if feed.get("source_id"):
+                        feeds_by_source.setdefault(feed["source_id"], []).append(feed)
+
+                cur.execute(
+                    """
+                    select *
+                    from (
+                        select
+                            sr.*,
+                            row_number() over (
+                                partition by sr.source_id
+                                order by sr.started_at desc
+                            ) as rn
+                        from public.source_sync_runs sr
+                        where sr.source_id::text = any(%s)
+                    ) ranked
+                    where rn <= 20
+                    order by started_at desc;
+                    """,
+                    (source_ids,),
+                )
+                runs_by_source: dict[str, list[dict]] = {}
+                for row in cur.fetchall():
+                    run = _row_to_source_sync_run(row)
+                    if run.get("source_id"):
+                        runs_by_source.setdefault(run["source_id"], []).append(run)
+
+                cur.execute(
+                    """
+                    select
+                        source_id::text as source_id,
+                        count(*) as article_count,
+                        count(*) filter (
+                            where created_at >= now() - interval '24 hours'
+                        ) as articles_24h
+                    from public.ingested_articles
+                    where source_id::text = any(%s)
+                    group by source_id;
+                    """,
+                    (source_ids,),
+                )
+                article_counts = {
+                    row["source_id"]: (
+                        int(row.get("article_count") or 0),
+                        int(row.get("articles_24h") or 0),
+                    )
+                    for row in cur.fetchall()
+                }
+
+        enriched_sources = []
+        for source in sources:
+            source_id = source.get("id")
+            article_count, articles_24h = article_counts.get(
+                source_id,
+                (int(source.get("article_count") or 0), 0),
+            )
+            enriched_sources.append(
+                {
+                    **source,
+                    "health": _source_health_from_parts(
+                        source,
+                        feeds_by_source.get(source_id, []),
+                        runs_by_source.get(source_id, []),
+                        article_count,
+                        articles_24h,
+                    ),
+                }
+            )
+        return enriched_sources
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not attach source health summaries: {exc}") from exc
 
 
 def _article_keyword_tokens(*values: str | None) -> list[str]:

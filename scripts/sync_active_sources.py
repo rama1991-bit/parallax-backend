@@ -44,6 +44,7 @@ def main() -> int:
                 "article_count": result["article_count"],
                 "card_count": result["card_count"],
                 "error_count": result["error_count"],
+                "sync_run_id": result.get("sync_run_id"),
                 "limits": result["limits"],
             },
             indent=2,
