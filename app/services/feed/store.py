@@ -36,6 +36,7 @@ SOURCES = []
 SOURCE_FEEDS = []
 INGESTED_ARTICLES = []
 SOURCE_SYNC_RUNS = []
+SOURCE_OPS_ALERTS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -67,6 +68,8 @@ _SOURCE_SYNC_SCOPES = {"source", "active_sources", "feed"}
 _SOURCE_SYNC_STATUSES = {"completed", "partial", "failed", "skipped"}
 _SOURCE_REVIEW_STATUSES = {"needs_review", "reviewed", "quarantined", "disabled"}
 _SOURCE_FEED_STATUSES = {"active", "paused", "quarantined", "disabled"}
+_SOURCE_OPS_ALERT_SEVERITIES = {"info", "warning", "critical"}
+_SOURCE_OPS_ALERT_STATUSES = {"active", "acknowledged", "resolved"}
 
 
 def now_iso():
@@ -400,6 +403,24 @@ def _ensure_schema():
                         summary jsonb not null default '{}'::jsonb,
                         created_at timestamptz not null default now()
                     );
+
+                    create table if not exists public.source_ops_alerts (
+                        id uuid primary key,
+                        alert_key text not null unique,
+                        alert_type text not null,
+                        severity text not null default 'warning',
+                        status text not null default 'active',
+                        source_id uuid references public.sources(id) on delete cascade,
+                        source_feed_id uuid references public.source_feeds(id) on delete set null,
+                        sync_run_id uuid references public.source_sync_runs(id) on delete set null,
+                        title text not null,
+                        message text not null,
+                        evidence jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        updated_at timestamptz not null default now(),
+                        acknowledged_at timestamptz,
+                        resolved_at timestamptz
+                    );
                     """
                 )
 
@@ -631,6 +652,37 @@ def _ensure_schema():
                     """
                     create index if not exists idx_source_sync_runs_source_started
                     on public.source_sync_runs (source_id, started_at desc);
+                    """,
+                    """
+                    create table if not exists public.source_ops_alerts (
+                        id uuid primary key,
+                        alert_key text not null unique,
+                        alert_type text not null,
+                        severity text not null default 'warning',
+                        status text not null default 'active',
+                        source_id uuid references public.sources(id) on delete cascade,
+                        source_feed_id uuid references public.source_feeds(id) on delete set null,
+                        sync_run_id uuid references public.source_sync_runs(id) on delete set null,
+                        title text not null,
+                        message text not null,
+                        evidence jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        updated_at timestamptz not null default now(),
+                        acknowledged_at timestamptz,
+                        resolved_at timestamptz
+                    );
+                    """,
+                    """
+                    create index if not exists idx_source_ops_alerts_status_severity
+                    on public.source_ops_alerts (status, severity, updated_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_ops_alerts_source
+                    on public.source_ops_alerts (source_id, status, updated_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_ops_alerts_feed
+                    on public.source_ops_alerts (source_feed_id, status, updated_at desc);
                     """,
                 ]:
                     cur.execute(statement)
@@ -2723,6 +2775,394 @@ def list_sources_needing_review(limit: int = 50) -> dict:
                     if (item.get("quality") or {}).get("quality_score", 0) < 0.55
                 ]
             ),
+        },
+    }
+
+
+def _normalize_ops_alert_severity(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "warning"
+    return clean if clean in _SOURCE_OPS_ALERT_SEVERITIES else "warning"
+
+
+def _normalize_ops_alert_status(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "active"
+    return clean if clean in _SOURCE_OPS_ALERT_STATUSES else "active"
+
+
+def _ops_alert_key(
+    alert_type: str,
+    source_id: str | None = None,
+    source_feed_id: str | None = None,
+) -> str:
+    return f"{alert_type}:{source_id or 'global'}:{source_feed_id or 'source'}"
+
+
+def _row_to_source_ops_alert(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "alert_key": row.get("alert_key"),
+        "alert_type": row.get("alert_type"),
+        "severity": row.get("severity") or "warning",
+        "status": row.get("status") or "active",
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "sync_run_id": str(row.get("sync_run_id")) if row.get("sync_run_id") else None,
+        "title": row.get("title") or "Source operations alert",
+        "message": row.get("message") or "",
+        "evidence": row.get("evidence") or {},
+        "created_at": _row_created_at(row),
+        "updated_at": _row_optional_datetime(row, "updated_at") or _row_created_at(row),
+        "acknowledged_at": _row_optional_datetime(row, "acknowledged_at"),
+        "resolved_at": _row_optional_datetime(row, "resolved_at"),
+    }
+
+
+def upsert_source_ops_alert(
+    *,
+    alert_type: str,
+    severity: str,
+    title: str,
+    message: str,
+    source_id: str | None = None,
+    source_feed_id: str | None = None,
+    sync_run_id: str | None = None,
+    evidence: dict | None = None,
+) -> dict:
+    clean_type = _clean_text(alert_type, 80) or "source_ops_alert"
+    clean_severity = _normalize_ops_alert_severity(severity)
+    clean_title = _clean_text(title, 220, "Source operations alert")
+    clean_message = _clean_text(message, 1200, "")
+    alert_key = _ops_alert_key(clean_type, source_id, source_feed_id)
+    now = now_iso()
+
+    if not database_enabled():
+        existing = next((alert for alert in SOURCE_OPS_ALERTS if alert.get("alert_key") == alert_key), None)
+        alert = {
+            "id": existing.get("id") if existing else str(uuid4()),
+            "alert_key": alert_key,
+            "alert_type": clean_type,
+            "severity": clean_severity,
+            "status": "active",
+            "source_id": source_id,
+            "source_feed_id": source_feed_id,
+            "sync_run_id": sync_run_id,
+            "title": clean_title,
+            "message": clean_message,
+            "evidence": evidence or {},
+            "created_at": existing.get("created_at") if existing else now,
+            "updated_at": now,
+            "acknowledged_at": None,
+            "resolved_at": None,
+        }
+        if existing:
+            existing.clear()
+            existing.update(alert)
+        else:
+            SOURCE_OPS_ALERTS.insert(0, alert)
+        return alert
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_ops_alerts (
+                        id, alert_key, alert_type, severity, status, source_id,
+                        source_feed_id, sync_run_id, title, message, evidence,
+                        created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, now(), now())
+                    on conflict (alert_key) do update set
+                        alert_type = excluded.alert_type,
+                        severity = excluded.severity,
+                        status = 'active',
+                        source_id = excluded.source_id,
+                        source_feed_id = excluded.source_feed_id,
+                        sync_run_id = excluded.sync_run_id,
+                        title = excluded.title,
+                        message = excluded.message,
+                        evidence = excluded.evidence,
+                        updated_at = now(),
+                        acknowledged_at = null,
+                        resolved_at = null
+                    returning *;
+                    """,
+                    (
+                        str(uuid4()),
+                        alert_key,
+                        clean_type,
+                        clean_severity,
+                        source_id,
+                        source_feed_id,
+                        sync_run_id,
+                        clean_title,
+                        clean_message,
+                        Json(evidence or {}),
+                    ),
+                )
+                return _row_to_source_ops_alert(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source ops alert: {exc}") from exc
+
+
+def list_source_ops_alerts(
+    *,
+    status: str | None = "active",
+    source_id: str | None = None,
+    severity: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 50), 250))
+    clean_status = _clean_text(status, 40)
+    clean_severity = _clean_text(severity, 40)
+
+    def matches(alert: dict) -> bool:
+        return (
+            (not clean_status or alert.get("status") == clean_status)
+            and (not source_id or alert.get("source_id") == source_id)
+            and (not clean_severity or alert.get("severity") == clean_severity)
+        )
+
+    if not database_enabled():
+        severity_rank = {"critical": 3, "warning": 2, "info": 1}
+        alerts = [alert for alert in SOURCE_OPS_ALERTS if matches(alert)]
+        alerts.sort(
+            key=lambda item: (
+                severity_rank.get(item.get("severity"), 0),
+                item.get("updated_at") or item.get("created_at") or "",
+            ),
+            reverse=True,
+        )
+        return alerts[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_status:
+        where.append("status = %s")
+        params.append(clean_status)
+    if source_id:
+        where.append("source_id::text = %s")
+        params.append(source_id)
+    if clean_severity:
+        where.append("severity = %s")
+        params.append(clean_severity)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_ops_alerts
+                    {where_sql}
+                    order by
+                        case severity
+                            when 'critical' then 3
+                            when 'warning' then 2
+                            else 1
+                        end desc,
+                        updated_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_ops_alert(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source ops alerts: {exc}") from exc
+
+
+def acknowledge_source_ops_alert(alert_id: str) -> dict | None:
+    if not database_enabled():
+        for alert in SOURCE_OPS_ALERTS:
+            if alert.get("id") != alert_id:
+                continue
+            alert["status"] = "acknowledged"
+            alert["acknowledged_at"] = now_iso()
+            alert["updated_at"] = alert["acknowledged_at"]
+            return alert
+        return None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    update public.source_ops_alerts
+                    set status = 'acknowledged',
+                        acknowledged_at = now(),
+                        updated_at = now()
+                    where id::text = %s
+                    returning *;
+                    """,
+                    (alert_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_source_ops_alert(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not acknowledge source ops alert: {exc}") from exc
+
+
+def _source_ops_alert_payload(
+    source: dict,
+    health: dict,
+    quality: dict,
+    sync_run_id: str | None,
+) -> dict:
+    return {
+        "source": {
+            "id": source.get("id"),
+            "name": source.get("name"),
+            "review_status": source.get("review_status"),
+            "quality_score": source.get("quality_score"),
+        },
+        "health": {
+            "status": health.get("status"),
+            "last_success_at": health.get("last_success_at"),
+            "last_error": health.get("last_error"),
+            "success_rate": health.get("success_rate"),
+            "articles_24h": health.get("articles_24h"),
+            "run_count": health.get("run_count"),
+        },
+        "quality": {
+            "quality_score": quality.get("quality_score"),
+            "quality_grade": quality.get("quality_grade"),
+            "risks": quality.get("risks") or [],
+        },
+        "sync_run_id": sync_run_id,
+    }
+
+
+def evaluate_source_ops_alerts(
+    *,
+    source_id: str | None = None,
+    sync_run_id: str | None = None,
+    limit: int = 250,
+) -> dict:
+    if source_id:
+        source = get_source_record(source_id)
+        sources = [source] if source else []
+    else:
+        sources = list_source_records(limit=limit)
+
+    generated: list[dict] = []
+    evaluated_count = 0
+    for source in sources:
+        if not source or not source.get("id"):
+            continue
+        evaluated_count += 1
+        source_id_value = source["id"]
+        health = build_source_health_summary(source_id_value)
+        quality = calculate_source_quality_report(source_id_value)
+        feeds = list_source_feed_records(source_id=source_id_value)
+        evidence = _source_ops_alert_payload(source, health, quality, sync_run_id)
+        source_name = source.get("name") or "Source"
+
+        if source.get("review_status") in {"quarantined", "disabled"}:
+            generated.append(
+                upsert_source_ops_alert(
+                    alert_type=f"source_{source.get('review_status')}",
+                    severity="critical" if source.get("review_status") == "disabled" else "warning",
+                    source_id=source_id_value,
+                    sync_run_id=sync_run_id,
+                    title=f"{source_name} is {source.get('review_status')}",
+                    message="Ingestion is skipped until the source review status is changed.",
+                    evidence=evidence,
+                )
+            )
+
+        if health.get("status") == "stale":
+            generated.append(
+                upsert_source_ops_alert(
+                    alert_type="stale_source",
+                    severity="warning",
+                    source_id=source_id_value,
+                    sync_run_id=sync_run_id,
+                    title=f"{source_name} has stale ingestion",
+                    message=health.get("recommendation") or "No recent successful sync was detected.",
+                    evidence=evidence,
+                )
+            )
+        elif health.get("status") == "error":
+            generated.append(
+                upsert_source_ops_alert(
+                    alert_type="sync_failure",
+                    severity="critical",
+                    source_id=source_id_value,
+                    sync_run_id=sync_run_id,
+                    title=f"{source_name} sync is failing",
+                    message=health.get("last_error") or health.get("recommendation") or "Recent sync attempts failed.",
+                    evidence=evidence,
+                )
+            )
+
+        if source.get("review_status") == "reviewed" and health.get("active_feed_count", 0) > 0 and health.get("articles_24h", 0) == 0:
+            generated.append(
+                upsert_source_ops_alert(
+                    alert_type="zero_articles_24h",
+                    severity="warning",
+                    source_id=source_id_value,
+                    sync_run_id=sync_run_id,
+                    title=f"{source_name} produced no articles in 24h",
+                    message="A reviewed source with active feeds has not produced articles in the last 24 hours.",
+                    evidence=evidence,
+                )
+            )
+
+        if quality.get("quality_score", 0) < 0.55:
+            generated.append(
+                upsert_source_ops_alert(
+                    alert_type="low_quality_source",
+                    severity="warning",
+                    source_id=source_id_value,
+                    sync_run_id=sync_run_id,
+                    title=f"{source_name} has low ingestion quality",
+                    message=quality.get("recommendation") or "Source metadata or ingestion quality needs review.",
+                    evidence=evidence,
+                )
+            )
+
+        for feed in feeds:
+            if feed.get("status") in {"quarantined", "disabled"}:
+                generated.append(
+                    upsert_source_ops_alert(
+                        alert_type=f"feed_{feed.get('status')}",
+                        severity="critical" if feed.get("status") == "disabled" else "warning",
+                        source_id=source_id_value,
+                        source_feed_id=feed.get("id"),
+                        sync_run_id=sync_run_id,
+                        title=f"{source_name} feed is {feed.get('status')}",
+                        message=feed.get("disabled_reason") or "Feed is excluded from scheduled ingestion.",
+                        evidence={**evidence, "feed": feed},
+                    )
+                )
+            elif feed.get("last_error"):
+                generated.append(
+                    upsert_source_ops_alert(
+                        alert_type="feed_error",
+                        severity="warning",
+                        source_id=source_id_value,
+                        source_feed_id=feed.get("id"),
+                        sync_run_id=sync_run_id,
+                        title=f"{source_name} feed reported an error",
+                        message=feed.get("last_error") or "Feed sync reported an error.",
+                        evidence={**evidence, "feed": feed},
+                    )
+                )
+
+    active = list_source_ops_alerts(status="active", limit=limit)
+    return {
+        "status": "evaluated",
+        "evaluated_source_count": evaluated_count,
+        "generated_alert_count": len(generated),
+        "alerts": generated,
+        "active_alert_count": len(active),
+        "summary": {
+            "critical": len([alert for alert in active if alert.get("severity") == "critical"]),
+            "warning": len([alert for alert in active if alert.get("severity") == "warning"]),
+            "info": len([alert for alert in active if alert.get("severity") == "info"]),
         },
     }
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from app.core.session import ANONYMOUS_SESSION_ID
 from app.services.feed.store import (
     FeedStoreError,
+    evaluate_source_ops_alerts,
     get_source_record,
     list_source_feed_records,
     list_source_records,
@@ -36,6 +37,13 @@ def _sync_status(feed_count: int, synced_feed_count: int, error_count: int) -> s
 def _safe_record_sync_run(**kwargs) -> dict | None:
     try:
         return record_source_sync_run(**kwargs)
+    except FeedStoreError:
+        return None
+
+
+def _safe_evaluate_ops_alerts(**kwargs) -> dict | None:
+    try:
+        return evaluate_source_ops_alerts(**kwargs)
     except FeedStoreError:
         return None
 
@@ -87,6 +95,10 @@ def _skipped_source_result(source: dict, session_id: str, started_at: datetime, 
     if run:
         result["sync_run"] = run
         result["sync_run_id"] = run["id"]
+        result["ops_alerts"] = _safe_evaluate_ops_alerts(
+            source_id=source.get("id"),
+            sync_run_id=run["id"],
+        )
     return result
 
 
@@ -206,6 +218,10 @@ async def sync_source_feeds(
     if run:
         result["sync_run"] = run
         result["sync_run_id"] = run["id"]
+        result["ops_alerts"] = _safe_evaluate_ops_alerts(
+            source_id=source_id,
+            sync_run_id=run["id"],
+        )
     else:
         result["sync_run_log_error"] = "Sync completed but run logging failed."
     return result
@@ -313,6 +329,7 @@ async def sync_active_source_feeds(
     if run:
         result["sync_run"] = run
         result["sync_run_id"] = run["id"]
+        result["ops_alerts"] = _safe_evaluate_ops_alerts(sync_run_id=run["id"], limit=max_sources)
     else:
         result["sync_run_log_error"] = "Sync completed but run logging failed."
     return result

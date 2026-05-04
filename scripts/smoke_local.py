@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.v1.routes import analyze as analyze_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
+from app.services import osint as osint_service  # noqa: E402
 from app.services import source_sync as source_sync_service  # noqa: E402
 from app.services.feed import store  # noqa: E402
 
@@ -43,6 +44,7 @@ def _reset_memory_store() -> None:
         store.SOURCE_FEEDS,
         store.INGESTED_ARTICLES,
         store.SOURCE_SYNC_RUNS,
+        store.SOURCE_OPS_ALERTS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -228,6 +230,7 @@ def main() -> int:
     ).json()
     assert quarantined_sync["status"] == "skipped", quarantined_sync
     assert quarantined_sync["rss_feed_count"] == 0, quarantined_sync
+    assert quarantined_sync["ops_alerts"]["generated_alert_count"] >= 1, quarantined_sync
     reactivated_feed = _assert_ok(
         client.post(
             f"/api/v1/sources/feeds/{rss_feed['id']}/status",
@@ -271,6 +274,25 @@ def main() -> int:
     ).json()
     assert disabled_sync["status"] == "skipped", disabled_sync
     assert "disabled" in disabled_sync["skipped_reason"], disabled_sync
+    assert disabled_sync["ops_alerts"]["generated_alert_count"] >= 1, disabled_sync
+
+    ops_evaluation = _assert_ok(
+        client.post("/api/v1/sources/ops/alerts/evaluate?limit=25", headers=admin_headers),
+        "sources/ops-alerts-evaluate",
+    ).json()
+    assert ops_evaluation["active_alert_count"] >= 1, ops_evaluation
+    ops_alerts = _assert_ok(
+        client.get("/api/v1/sources/ops/alerts", headers=admin_headers),
+        "sources/ops-alerts",
+    ).json()["alerts"]
+    assert any(alert["alert_type"] == "source_disabled" for alert in ops_alerts), ops_alerts
+    denied_ops_alerts = client.get("/api/v1/sources/ops/alerts", headers=headers)
+    assert denied_ops_alerts.status_code == 403, denied_ops_alerts.text
+    acknowledged_ops_alert = _assert_ok(
+        client.post(f"/api/v1/sources/ops/alerts/{ops_alerts[0]['id']}/acknowledge", headers=admin_headers),
+        "sources/ops-alert-acknowledge",
+    ).json()
+    assert acknowledged_ops_alert["status"] == "acknowledged", acknowledged_ops_alert
 
     original_parse_rss_feed = source_sync_service.parse_rss_feed
 
@@ -513,6 +535,23 @@ def main() -> int:
     assert osint_context["article_id"] == ingested_article_id, osint_context
     assert "source_article" in osint_context["source_type"], osint_context
     assert osint_context["citations"], osint_context
+    previous_external = osint_service.settings.EXTERNAL_RETRIEVAL_ENABLED
+    previous_provider = osint_service.settings.RETRIEVAL_PROVIDER
+    try:
+        osint_service.settings.EXTERNAL_RETRIEVAL_ENABLED = True
+        osint_service.settings.RETRIEVAL_PROVIDER = "mock"
+        external_osint_context = _assert_ok(
+            client.get(
+                f"/api/v1/sources/articles/{ingested_article_id}/osint?include_external=true&limit=2",
+                headers=headers,
+            ),
+            "sources/article-osint-external-mock",
+        ).json()
+    finally:
+        osint_service.settings.EXTERNAL_RETRIEVAL_ENABLED = previous_external
+        osint_service.settings.RETRIEVAL_PROVIDER = previous_provider
+    assert external_osint_context["retrieval_mode"]["external_results_included"] >= 1, external_osint_context
+    assert "mock_public_search_result" in external_osint_context["source_type"], external_osint_context
 
     report = _assert_ok(client.get(f"/api/v1/reports/{card['report_id']}", headers=headers), "report").json()
     assert report["id"] == card["report_id"], report

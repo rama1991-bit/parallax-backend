@@ -16,10 +16,13 @@ from app.services.feed.store import (
     calculate_source_quality_report,
     create_source_feed_record,
     create_source_record,
+    acknowledge_source_ops_alert,
+    evaluate_source_ops_alerts,
     get_ingested_article_record,
     get_source_record,
     list_ingested_article_records,
     list_source_feed_records,
+    list_source_ops_alerts,
     list_source_records,
     list_sources_needing_review,
     list_source_sync_runs,
@@ -215,6 +218,60 @@ async def list_source_review_queue(
         return list_sources_needing_review(limit=limit)
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/ops/alerts")
+async def list_source_operational_alerts(
+    limit: int = Query(default=50, ge=1, le=250),
+    status: str | None = Query(default="active"),
+    source_id: str | None = None,
+    severity: str | None = None,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        alerts = list_source_ops_alerts(
+            status=status,
+            source_id=source_id,
+            severity=severity,
+            limit=limit,
+        )
+        return {
+            "alerts": alerts,
+            "summary": {
+                "alert_count": len(alerts),
+                "critical": len([alert for alert in alerts if alert.get("severity") == "critical"]),
+                "warning": len([alert for alert in alerts if alert.get("severity") == "warning"]),
+                "info": len([alert for alert in alerts if alert.get("severity") == "info"]),
+            },
+        }
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/ops/alerts/evaluate")
+async def evaluate_source_operational_alerts(
+    limit: int = Query(default=250, ge=1, le=250),
+    source_id: str | None = None,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return evaluate_source_ops_alerts(source_id=source_id, limit=limit)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/ops/alerts/{alert_id}/acknowledge")
+async def acknowledge_source_operational_alert(
+    alert_id: str,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        alert = acknowledge_source_ops_alert(alert_id)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail="Source operations alert not found")
+    return alert
 
 
 @router.post("/feeds/{feed_id}/status")

@@ -337,10 +337,10 @@ def build_bounded_osint_context(article: dict, external_results: list[dict] | No
             _reference(
                 title=result.get("title") or result.get("url") or "Public search result",
                 url=result.get("url"),
-                source_type="public_web_search_result",
-                reliability_level="unverified_public_reference",
+                source_type=result.get("source_type") or "public_web_search_result",
+                reliability_level=result.get("reliability_level") or "unverified_public_reference",
                 relevance=max(0.25, 0.7 - index * 0.08),
-                role="external_search_result",
+                role=result.get("role") or "external_search_result",
                 risks=[
                     "Public search results require source-by-source validation.",
                     "Snippet/title matching does not imply factual confirmation.",
@@ -421,7 +421,32 @@ def build_bounded_osint_context(article: dict, external_results: list[dict] | No
     }
 
 
-async def fetch_public_search_results(query: str, limit: int = 5) -> list[dict]:
+def _mock_public_search_results(query: str, limit: int = 5) -> list[dict]:
+    clean_query = _clean_text(query, 220)
+    if not clean_query:
+        return []
+    results = [
+        {
+            "title": f"Mock public search lead: {clean_query}",
+            "url": _search_url(clean_query),
+            "provider": "mock",
+            "source_type": "mock_public_search_result",
+            "reliability_level": "mock_context_probe",
+            "role": "mock_external_search_result",
+        },
+        {
+            "title": f"Mock official-document lead: {clean_query}",
+            "url": _search_url(f"{clean_query} official document"),
+            "provider": "mock",
+            "source_type": "mock_official_document_probe",
+            "reliability_level": "mock_context_probe",
+            "role": "mock_official_context_result",
+        },
+    ]
+    return results[: max(1, min(limit, 10))]
+
+
+async def _fetch_web_search_results(query: str, limit: int = 5) -> list[dict]:
     clean_query = _clean_text(query, 220)
     if not clean_query:
         return []
@@ -438,7 +463,27 @@ async def fetch_public_search_results(query: str, limit: int = 5) -> list[dict]:
 
     parser = _SearchResultParser(limit=max(1, min(limit, 10)))
     parser.feed(response.text)
-    return parser.results[:limit]
+    return [
+        {
+            **result,
+            "provider": "web",
+            "source_type": "public_web_search_result",
+            "reliability_level": "unverified_public_reference",
+            "role": "external_search_result",
+        }
+        for result in parser.results[:limit]
+    ]
+
+
+async def fetch_public_search_results(query: str, limit: int = 5) -> list[dict]:
+    provider = (settings.RETRIEVAL_PROVIDER or "mock").strip().lower()
+    if provider in {"mock", "none"}:
+        return _mock_public_search_results(query, limit=limit)
+    if provider in {"web", "duckduckgo", "public_web"}:
+        return await _fetch_web_search_results(query, limit=limit)
+    raise OSINTContextError(
+        f"Unsupported retrieval provider {settings.RETRIEVAL_PROVIDER!r}. Use mock or web."
+    )
 
 
 async def build_article_osint_context(

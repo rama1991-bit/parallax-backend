@@ -45,6 +45,7 @@ def main() -> int:
                 "card_count": result["card_count"],
                 "error_count": result["error_count"],
                 "sync_run_id": result.get("sync_run_id"),
+                "ops_alerts": result.get("ops_alerts", {}).get("summary"),
                 "limits": result["limits"],
             },
             indent=2,

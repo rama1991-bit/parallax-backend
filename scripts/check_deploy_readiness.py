@@ -313,6 +313,15 @@ def build_report(strict: bool = False) -> dict[str, Any]:
             "EXTERNAL_RETRIEVAL_ENABLED=true but RETRIEVAL_PROVIDER=mock.",
             "Configure a real retrieval provider before relying on external OSINT enrichment.",
         )
+    if retrieval_provider not in {"mock", "none", "web", "duckduckgo", "public_web"}:
+        _fail_or_warn(
+            errors,
+            warnings,
+            production_like,
+            "RETRIEVAL_PROVIDER",
+            f"Unsupported RETRIEVAL_PROVIDER: {settings.RETRIEVAL_PROVIDER!r}.",
+            "Use RETRIEVAL_PROVIDER=mock for deterministic probes or RETRIEVAL_PROVIDER=web for public web search.",
+        )
 
     status = "ready" if not errors else "blocked"
     return {

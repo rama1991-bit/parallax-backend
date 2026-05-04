@@ -37,7 +37,7 @@ These frontend surfaces have real backend support:
 - `/` smart feed: `GET /api/v1/feed`, feed card actions, `POST /api/v1/analyze` by URL or `ingested_article_id`
 - `/topics`: `GET/POST /api/v1/topics`, `POST /api/v1/topics/monitor`
 - `/feeds`: `GET/POST /api/v1/feeds`, `POST /api/v1/feeds/{feed_id}/sync`
-- `/sources`: `GET/POST /api/v1/sources`, source health summaries, quality scores, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, admin-key-protected sync-run history, review queue, source review updates, quality recalculation, feed pause/quarantine/disable controls, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
+- `/sources`: `GET/POST /api/v1/sources`, source health summaries, quality scores, default source preview, admin-key-protected default source seed, admin-key-protected `POST /api/v1/sources/sync-active`, admin-key-protected `POST /api/v1/sources/{source_id}/sync`, admin-key-protected sync-run history, review queue, operational alert evaluation/list/acknowledgement, source review updates, quality recalculation, feed pause/quarantine/disable controls, source feed routes, hydrated article detail, `GET /api/v1/sources/articles/{article_id}/nodes`, and `GET /api/v1/sources/articles/{article_id}/osint`
 - `/compare`: `POST /api/v1/compare`, `GET /api/v1/compare/{article_id}`
 - `/notifications`: `GET /api/v1/alerts`, read/read-all/unread count
 - `/reports/{id}`: report detail, save/unsave, JSON/Markdown export
@@ -60,6 +60,7 @@ Known MVP gaps:
 - Active RSS ingestion can be scheduled with `POST /api/v1/sources/sync-active` or `python scripts/sync_active_sources.py`.
 - Source ingestion now records `source_sync_runs` and exposes source health summaries; treat these as operational signals, not editorial quality judgments.
 - Source quality governance now records review status, review notes, disabled reasons, quality scores, and feed-level governance status; treat quality scores as ingestion readiness signals, not source credibility verdicts.
+- Source operational alerts now flag stale sources, repeated sync failures, low source quality, quarantined/disabled sources, feed errors, and reviewed sources with no recent articles.
 
 ## Deploy Readiness
 
@@ -87,7 +88,7 @@ python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --artic
 
 Run it every 15 minutes once the backend has migrations applied and the default source database has been reviewed. The script isolates feed-level failures so one broken feed does not stop the whole batch. Keep conservative limits in production until source quality, hosting quotas, and upstream feed behavior are understood.
 
-The scheduler output is JSON and includes `sync_run_id`, status, feed/article/card counts, error count, and the applied limits. A non-zero exit is reserved for runs that have errors and no saved articles, so hosted schedulers can flag fully failed batches without paging on partial successes.
+The scheduler output is JSON and includes `sync_run_id`, status, feed/article/card counts, error count, operational alert summary, and the applied limits. A non-zero exit is reserved for runs that have errors and no saved articles, so hosted schedulers can flag fully failed batches without paging on partial successes.
 
 HTTP scheduler alternative:
 
@@ -127,6 +128,23 @@ Watch these fields after deploy:
 - `sync_runs.error_count`
 
 Initial alert candidates: no successful source sync in 24 hours, repeated `error` status, `success_rate` below 50% after several runs, or zero `articles_24h` for high-priority active sources.
+
+Evaluate operational alerts:
+
+```bash
+curl -X POST https://your-backend.example.com/api/v1/sources/ops/alerts/evaluate \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+```
+
+List and acknowledge operational alerts:
+
+```bash
+curl https://your-backend.example.com/api/v1/sources/ops/alerts \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+
+curl -X POST https://your-backend.example.com/api/v1/sources/ops/alerts/<alert_id>/acknowledge \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+```
 
 ## Source Quality Governance
 
@@ -171,6 +189,24 @@ Governance behavior:
 - `quality_score` measures metadata completeness, feed availability, sync success, recent article production, terms review, and governance risks.
 - `quality_score` is an ingestion-readiness signal, not a truth, bias, or credibility verdict.
 
+## OSINT Retrieval
+
+Default mode is deterministic:
+
+```bash
+RETRIEVAL_PROVIDER=mock
+EXTERNAL_RETRIEVAL_ENABLED=false
+```
+
+Public web-search retrieval can be enabled explicitly:
+
+```bash
+RETRIEVAL_PROVIDER=web
+EXTERNAL_RETRIEVAL_ENABLED=true
+```
+
+The OSINT layer still returns context, references, risks, contradictions, and citations only. It does not mark claims true or false. `RETRIEVAL_PROVIDER=mock` is useful for smoke tests and UI flow validation; `RETRIEVAL_PROVIDER=web` fetches public web search results and must be monitored for upstream availability, rate limits, and result quality.
+
 ## Smoke
 
 Safe local smoke:
@@ -185,7 +221,7 @@ Staging database smoke:
 PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py
 ```
 
-The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed, sync, sync-run history, source review, review queue, feed quarantine/reactivation, source disable skip behavior, default source seed preview/import, active source sync, sync-run persistence, source health summaries, quality scoring, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
+The smoke covers health, session identity, onboarding, feed cards, alerts, source profiles, Phase 2 source ingestion, admin-key rejection/acceptance for default source seed, sync, sync-run history, source operational alerts, alert acknowledgement, source review, review queue, feed quarantine/reactivation, source disable skip behavior, default source seed preview/import, active source sync, sync-run persistence, source health summaries, quality scoring, ingested-article analysis persistence, hydrated article detail, node graph materialization, bounded OSINT context, OSINT mock retrieval boundary, article-id compare, reports, saved reports, public briefs, topics, feeds, and session isolation.
 
 Read-only deployed backend smoke:
 
