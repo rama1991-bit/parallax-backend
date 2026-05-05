@@ -14,6 +14,10 @@ SCHEDULER_COMMAND = (
     "python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 "
     "--article-limit 10 --card-limit 25"
 )
+INTELLIGENCE_SCHEDULER_COMMAND = (
+    "python scripts/refresh_intelligence_snapshots.py --source-limit 50 "
+    "--topic-limit 50 --article-limit 100"
+)
 
 PRODUCTION_ENV_VARS = [
     "ENV=production",
@@ -406,6 +410,9 @@ def build_report(strict: bool = False) -> dict[str, Any]:
             "purpose": "Run active RSS source ingestion on a recurring worker or platform scheduler.",
             "recommended_interval": "15 minutes",
             "command": SCHEDULER_COMMAND,
+            "follow_up_purpose": "Refresh source/topic intelligence snapshots after ingestion batches.",
+            "follow_up_interval": "15-60 minutes after ingestion",
+            "follow_up_command": INTELLIGENCE_SCHEDULER_COMMAND,
             "admin_api_alternative": "POST /api/v1/sources/sync-active with X-Parallax-Admin-Key",
         },
         "required_env": PRODUCTION_ENV_VARS,
@@ -436,6 +443,8 @@ def print_text(report: dict[str, Any]) -> None:
     print("\nScheduler:")
     print(f"- Interval: {report['scheduler']['recommended_interval']}")
     print(f"- Command: {report['scheduler']['command']}")
+    print(f"- Follow-up interval: {report['scheduler']['follow_up_interval']}")
+    print(f"- Follow-up command: {report['scheduler']['follow_up_command']}")
     print(f"- API alternative: {report['scheduler']['admin_api_alternative']}")
 
     print("\nProduction env:")

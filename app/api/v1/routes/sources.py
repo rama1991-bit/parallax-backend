@@ -33,6 +33,7 @@ from app.services.feed.store import (
     update_source_review_status,
 )
 from app.services.ops_notifications import deliver_source_ops_alerts
+from app.services.intelligence_aggregation import build_source_intelligence
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
@@ -389,6 +390,34 @@ async def get_ingested_article_osint(
     except OSINTContextError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/{source_id}/intelligence")
+async def get_source_intelligence(
+    source_id: str,
+    refresh: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=250),
+):
+    try:
+        return await build_source_intelligence(source_id, refresh=refresh, limit=limit)
+    except FeedStoreError as exc:
+        if str(exc) == "Source not found.":
+            raise HTTPException(status_code=404, detail="Source not found") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{source_id}/intelligence/refresh")
+async def refresh_source_intelligence(
+    source_id: str,
+    limit: int = Query(default=100, ge=1, le=250),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await build_source_intelligence(source_id, refresh=True, limit=limit)
+    except FeedStoreError as exc:
+        if str(exc) == "Source not found.":
+            raise HTTPException(status_code=404, detail="Source not found") from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

@@ -38,6 +38,7 @@ INGESTED_ARTICLES = []
 SOURCE_SYNC_RUNS = []
 SOURCE_OPS_ALERTS = []
 SOURCE_OPS_ALERT_DELIVERIES = []
+INTELLIGENCE_SNAPSHOTS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -440,6 +441,17 @@ def _ensure_schema():
                         created_at timestamptz not null default now(),
                         delivered_at timestamptz
                     );
+
+                    create table if not exists public.intelligence_snapshots (
+                        id uuid primary key,
+                        snapshot_type text not null check (snapshot_type in ('source', 'topic')),
+                        subject_id text not null,
+                        title text,
+                        payload jsonb not null default '{}'::jsonb,
+                        provider_metadata jsonb not null default '{}'::jsonb,
+                        sample_size integer not null default 0,
+                        created_at timestamptz not null default now()
+                    );
                     """
                 )
 
@@ -716,6 +728,26 @@ def _ensure_schema():
                     """
                     create index if not exists idx_source_ops_alert_deliveries_status_created
                     on public.source_ops_alert_deliveries (status, created_at desc);
+                    """,
+                    """
+                    create table if not exists public.intelligence_snapshots (
+                        id uuid primary key,
+                        snapshot_type text not null check (snapshot_type in ('source', 'topic')),
+                        subject_id text not null,
+                        title text,
+                        payload jsonb not null default '{}'::jsonb,
+                        provider_metadata jsonb not null default '{}'::jsonb,
+                        sample_size integer not null default 0,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create index if not exists idx_intelligence_snapshots_subject_created
+                    on public.intelligence_snapshots (snapshot_type, subject_id, created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_intelligence_snapshots_created
+                    on public.intelligence_snapshots (created_at desc);
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -3302,6 +3334,137 @@ def attach_source_ops_alert_delivery_status(alerts: list[dict]) -> list[dict]:
             }
         )
     return enriched
+
+
+def _normalize_snapshot_type(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "source"
+    return clean if clean in {"source", "topic"} else "source"
+
+
+def _row_to_intelligence_snapshot(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "snapshot_type": row.get("snapshot_type") or "source",
+        "subject_id": row.get("subject_id"),
+        "title": row.get("title"),
+        "payload": row.get("payload") or {},
+        "provider_metadata": row.get("provider_metadata") or {},
+        "sample_size": int(row.get("sample_size") or 0),
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_intelligence_snapshot(
+    *,
+    snapshot_type: str,
+    subject_id: str,
+    title: str | None = None,
+    payload: dict | None = None,
+    provider_metadata: dict | None = None,
+    sample_size: int = 0,
+) -> dict:
+    clean_type = _normalize_snapshot_type(snapshot_type)
+    clean_subject_id = _clean_text(subject_id, 120)
+    if not clean_subject_id:
+        raise FeedStoreError("Intelligence snapshot subject_id is required.")
+    clean_title = _clean_text(title, 240)
+    snapshot = {
+        "id": str(uuid4()),
+        "snapshot_type": clean_type,
+        "subject_id": clean_subject_id,
+        "title": clean_title,
+        "payload": payload or {},
+        "provider_metadata": provider_metadata or {},
+        "sample_size": max(0, int(sample_size or 0)),
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        INTELLIGENCE_SNAPSHOTS.insert(0, snapshot)
+        return snapshot
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.intelligence_snapshots (
+                        id, snapshot_type, subject_id, title, payload,
+                        provider_metadata, sample_size, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        snapshot["id"],
+                        clean_type,
+                        clean_subject_id,
+                        clean_title,
+                        Json(payload or {}),
+                        Json(provider_metadata or {}),
+                        snapshot["sample_size"],
+                    ),
+                )
+                return _row_to_intelligence_snapshot(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save intelligence snapshot: {exc}") from exc
+
+
+def list_intelligence_snapshots(
+    *,
+    snapshot_type: str | None = None,
+    subject_id: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 50), 250))
+    clean_type = _normalize_snapshot_type(snapshot_type) if snapshot_type else None
+    clean_subject_id = _clean_text(subject_id, 120)
+
+    if not database_enabled():
+        snapshots = [
+            snapshot
+            for snapshot in INTELLIGENCE_SNAPSHOTS
+            if (not clean_type or snapshot.get("snapshot_type") == clean_type)
+            and (not clean_subject_id or snapshot.get("subject_id") == clean_subject_id)
+        ]
+        return sorted(snapshots, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_type:
+        where.append("snapshot_type = %s")
+        params.append(clean_type)
+    if clean_subject_id:
+        where.append("subject_id = %s")
+        params.append(clean_subject_id)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.intelligence_snapshots
+                    {where_sql}
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_intelligence_snapshot(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list intelligence snapshots: {exc}") from exc
+
+
+def get_latest_intelligence_snapshot(snapshot_type: str, subject_id: str) -> dict | None:
+    snapshots = list_intelligence_snapshots(
+        snapshot_type=snapshot_type,
+        subject_id=subject_id,
+        limit=1,
+    )
+    return snapshots[0] if snapshots else None
 
 
 def _source_ops_alert_payload(

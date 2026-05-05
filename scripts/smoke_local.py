@@ -49,6 +49,7 @@ def _reset_memory_store() -> None:
         store.SOURCE_SYNC_RUNS,
         store.SOURCE_OPS_ALERTS,
         store.SOURCE_OPS_ALERT_DELIVERIES,
+        store.INTELLIGENCE_SNAPSHOTS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -495,6 +496,45 @@ def main() -> int:
     assert article_compare["provider_metadata"]["status"] == "heuristic", article_compare
     assert store.ARTICLE_COMPARISONS, article_compare
 
+    source_intelligence = _assert_ok(
+        client.get(f"/api/v1/sources/{source['id']}/intelligence", headers=headers),
+        "sources/intelligence",
+    ).json()
+    assert source_intelligence["sample"]["article_count"] >= 1, source_intelligence
+    assert source_intelligence["provider_metadata"]["status"] == "heuristic", source_intelligence
+    assert source_intelligence["snapshot"]["id"], source_intelligence
+    denied_source_intelligence_refresh = client.post(
+        f"/api/v1/sources/{source['id']}/intelligence/refresh",
+        headers=headers,
+    )
+    assert denied_source_intelligence_refresh.status_code == 403, denied_source_intelligence_refresh.text
+    refreshed_source_intelligence = _assert_ok(
+        client.post(f"/api/v1/sources/{source['id']}/intelligence/refresh", headers=admin_headers),
+        "sources/intelligence-refresh",
+    ).json()
+    assert refreshed_source_intelligence["snapshot"]["id"] != source_intelligence["snapshot"]["id"], refreshed_source_intelligence
+
+    energy_topic = next(
+        topic for topic in store.list_topics(session_id=session_id) if topic["name"] == "Energy transition"
+    )
+    topics_intelligence = _assert_ok(
+        client.get("/api/v1/topics/intelligence", headers=headers),
+        "topics/intelligence",
+    ).json()
+    assert topics_intelligence["summary"]["topic_count"] == 2, topics_intelligence
+    assert topics_intelligence["items"], topics_intelligence
+    topic_intelligence = _assert_ok(
+        client.get(f"/api/v1/topics/{energy_topic['id']}/intelligence", headers=headers),
+        "topics/topic-intelligence",
+    ).json()
+    assert topic_intelligence["subject"]["id"] == energy_topic["id"], topic_intelligence
+    assert topic_intelligence["sample"]["article_count"] >= 1, topic_intelligence
+    denied_topic_intelligence_refresh = client.post(
+        f"/api/v1/topics/{energy_topic['id']}/intelligence/refresh",
+        headers=headers,
+    )
+    assert denied_topic_intelligence_refresh.status_code == 403, denied_topic_intelligence_refresh.text
+
     article = ExtractedArticle(
         url="https://example.com/analysis",
         final_url="https://example.com/analysis",
@@ -653,6 +693,58 @@ def main() -> int:
                 },
                 "limitations": ["Provider synthesis does not validate claims."],
             }
+        if task == "source_intelligence_aggregation":
+            return {
+                "summary": "Provider-enhanced source aggregation focused on repeated grid-resilience framing.",
+                "framing_pattern": {
+                    "dominant_frames": ["institutional_response", "economic_consequence"],
+                    "frame_distribution": [
+                        {"label": "institutional_response", "count": 1, "share": 1.0}
+                    ],
+                },
+                "recurring_claims": ["Officials linked grid resilience to market and cost pressures."],
+                "entity_pattern": {
+                    "people": [],
+                    "organizations": ["Energy Market Agency"],
+                    "locations": [],
+                    "events": ["Grid resilience plan"],
+                },
+                "tone_pattern": {
+                    "dominant_tones": ["analytical"],
+                    "tone_distribution": [{"label": "analytical", "count": 1, "share": 1.0}],
+                },
+                "coverage_cadence": {},
+                "source_diversity": {},
+                "disagreement_zones": ["Provider says compare against regional coverage before inference."],
+                "weak_spots": ["Provider says the source sample remains small."],
+                "limitations": ["Provider aggregation is contextual and not a factual verdict."],
+            }
+        if task == "topic_intelligence_aggregation":
+            return {
+                "summary": "Provider-enhanced topic aggregation for energy-transition grid coverage.",
+                "framing_pattern": {
+                    "dominant_frames": ["institutional_response"],
+                    "frame_distribution": [
+                        {"label": "institutional_response", "count": 1, "share": 1.0}
+                    ],
+                },
+                "recurring_claims": ["Grid resilience coverage links policy response with cost concerns."],
+                "entity_pattern": {
+                    "people": [],
+                    "organizations": ["Grid Council"],
+                    "locations": [],
+                    "events": ["Grid resilience plan"],
+                },
+                "tone_pattern": {
+                    "dominant_tones": ["analytical"],
+                    "tone_distribution": [{"label": "analytical", "count": 1, "share": 1.0}],
+                },
+                "coverage_cadence": {},
+                "source_diversity": {},
+                "disagreement_zones": ["Provider says source-level comparison should be checked."],
+                "weak_spots": ["Provider says the topic sample is still thin."],
+                "limitations": ["Provider topic aggregation remains contextual."],
+            }
         return {}
 
     try:
@@ -678,6 +770,20 @@ def main() -> int:
             client.get(f"/api/v1/sources/articles/{ingested_article_id}/osint", headers=headers),
             "sources/article-osint-openai-provider",
         ).json()
+        model_source_intelligence = _assert_ok(
+            client.post(
+                f"/api/v1/sources/{source['id']}/intelligence/refresh",
+                headers=admin_headers,
+            ),
+            "sources/intelligence-openai-provider",
+        ).json()
+        model_topic_intelligence = _assert_ok(
+            client.post(
+                f"/api/v1/topics/{energy_topic['id']}/intelligence/refresh",
+                headers=admin_headers,
+            ),
+            "topics/intelligence-openai-provider",
+        ).json()
     finally:
         analysis_service.settings.AI_PROVIDER = previous_ai_provider
         analysis_service.settings.OPENAI_API_KEY = previous_openai_key
@@ -693,6 +799,10 @@ def main() -> int:
     assert model_compare["comparison"]["confidence"] == 0.74, model_compare
     assert model_osint["provider_metadata"]["status"] == "model", model_osint
     assert "Provider-highlighted OSINT risk" in model_osint["risks"][0], model_osint
+    assert model_source_intelligence["provider_metadata"]["status"] == "model", model_source_intelligence
+    assert "Provider-enhanced source aggregation" in model_source_intelligence["summary"], model_source_intelligence
+    assert model_topic_intelligence["provider_metadata"]["status"] == "model", model_topic_intelligence
+    assert "Provider-enhanced topic aggregation" in model_topic_intelligence["summary"], model_topic_intelligence
 
     feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
     assert len(feed["cards"]) >= 5, feed
