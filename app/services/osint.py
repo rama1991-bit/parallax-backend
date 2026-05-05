@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import httpx
 
 from app.core.config import settings
+from app.services.intelligence import enhance_osint_context, provider_metadata
 
 
 class OSINTContextError(Exception):
@@ -418,6 +419,7 @@ def build_bounded_osint_context(article: dict, external_results: list[dict] | No
             "Query probes are included so the UI can guide retrieval without overstating evidence.",
             "External search is disabled unless explicitly enabled by backend configuration.",
         ],
+        "provider_metadata": provider_metadata(task="osint_context_synthesis", status="heuristic"),
     }
 
 
@@ -512,4 +514,4 @@ async def build_article_osint_context(
         context["retrieval_mode"]["errors"].append(
             "External retrieval is disabled. Set EXTERNAL_RETRIEVAL_ENABLED=true to fetch public search results."
         )
-    return context
+    return await enhance_osint_context(context, article)

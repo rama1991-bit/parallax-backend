@@ -6,7 +6,7 @@ from pydantic import BaseModel, HttpUrl
 from app.core.session import get_session_id
 from app.services.analysis import AIAnalysisError, analyze_article as run_article_analysis
 from app.services.articles import ArticleFetchError, fetch_article
-from app.services.compare import build_compare_result, build_ingested_article_compare_result
+from app.services.compare import build_compare_result, build_enhanced_ingested_article_compare_result
 from app.services.feed.store import (
     FeedStoreError,
     QuotaExceededError,
@@ -83,7 +83,7 @@ async def compare_ingested_article(
     limit: int = Query(default=8, ge=1, le=25),
 ):
     try:
-        return build_ingested_article_compare_result(article_id, limit=limit)
+        return await build_enhanced_ingested_article_compare_result(article_id, limit=limit)
     except FeedStoreError as exc:
         message = str(exc)
         if "not found" in message.lower():

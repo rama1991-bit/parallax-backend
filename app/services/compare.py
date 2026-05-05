@@ -8,6 +8,7 @@ from app.services.feed.store import (
     list_ingested_article_records,
     save_article_comparison_record,
 )
+from app.services.intelligence import enhance_compare_result, provider_metadata
 
 
 STOPWORDS = {
@@ -182,6 +183,7 @@ def build_compare_result(left_card: dict, right_card: dict, usage: dict | None =
             "right_only": _ordered_difference(right_topics, left_topics),
         },
         "usage": usage,
+        "provider_metadata": provider_metadata(task="url_compare", status="heuristic"),
         "limitations": [
             "Claim overlap is lexical and approximate; it is a comparison signal, not a factual verdict.",
             "Framing divergence compares extracted frame labels and can miss subtle rhetorical differences.",
@@ -534,4 +536,10 @@ def build_ingested_article_compare_result(article_id: str, limit: int = 8) -> di
             "Unanalyzed articles can be matched by metadata, but claim and framing comparisons are limited.",
             "OSINT is not used here; this compares only ingested source articles and saved analysis.",
         ],
+        "provider_metadata": provider_metadata(task="cross_source_compare", status="heuristic"),
     }
+
+
+async def build_enhanced_ingested_article_compare_result(article_id: str, limit: int = 8) -> dict:
+    result = build_ingested_article_compare_result(article_id, limit=limit)
+    return await enhance_compare_result(result)

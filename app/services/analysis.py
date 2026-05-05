@@ -5,6 +5,7 @@ import httpx
 
 from app.core.config import settings
 from app.services.articles import ExtractedArticle
+from app.services.intelligence import provider_metadata
 
 
 class AIAnalysisError(Exception):
@@ -298,6 +299,10 @@ def sanitize_analysis(raw: dict, article: ExtractedArticle) -> dict:
         "confidence": round(_clamp(confidence), 3),
         "priority": priority,
         "card_type": card_type,
+        "provider_metadata": raw.get("provider_metadata") or provider_metadata(
+            task="article_analysis",
+            status="heuristic",
+        ),
     }
     return analysis
 
@@ -305,8 +310,18 @@ def sanitize_analysis(raw: dict, article: ExtractedArticle) -> dict:
 async def analyze_article(article: ExtractedArticle) -> dict:
     provider = settings.AI_PROVIDER.lower().strip()
     if provider in {"openai", "openai-compatible"}:
-        raw = await _openai_analysis(article)
+        try:
+            raw = await _openai_analysis(article)
+            raw["provider_metadata"] = provider_metadata(task="article_analysis", status="model")
+        except AIAnalysisError as exc:
+            raw = _heuristic_analysis(article)
+            raw["provider_metadata"] = provider_metadata(
+                task="article_analysis",
+                status="fallback",
+                warnings=[str(exc)],
+            )
     else:
         raw = _heuristic_analysis(article)
+        raw["provider_metadata"] = provider_metadata(task="article_analysis", status="heuristic")
 
     return sanitize_analysis(raw, article)

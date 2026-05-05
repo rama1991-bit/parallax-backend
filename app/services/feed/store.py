@@ -4169,6 +4169,48 @@ def _entity_nodes_from_intelligence(intelligence: dict) -> list[tuple[str, str]]
     return entity_nodes[:10]
 
 
+def _apply_node_perspective_hints(nodes: list[dict], intelligence: dict) -> list[dict]:
+    hints = intelligence.get("node_perspectives") if isinstance(intelligence.get("node_perspectives"), dict) else {}
+    provider_metadata = (
+        intelligence.get("provider_metadata") if isinstance(intelligence.get("provider_metadata"), dict) else None
+    )
+    if not hints and not provider_metadata:
+        return nodes
+
+    for node in nodes:
+        metadata = node.get("node_metadata") if isinstance(node.get("node_metadata"), dict) else {}
+        perspective = metadata.get("perspective") if isinstance(metadata.get("perspective"), dict) else {}
+        hint = hints.get(node.get("node_type")) or {}
+        if node.get("node_type") in {"person", "organization", "location"}:
+            hint = hint or hints.get("entity") or {}
+        if hint:
+            summary = _compact_text(
+                hint.get("summary"),
+                fallback=perspective.get("summary", ""),
+                limit=420,
+            )
+            signals = _safe_text_list(
+                [*(hint.get("signals") or []), *(perspective.get("signals") or [])],
+                limit=8,
+            )
+            limitations = _safe_text_list(
+                [*(hint.get("limitations") or []), *(perspective.get("limitations") or [])],
+                limit=8,
+            )
+            perspective = {
+                **perspective,
+                "summary": summary,
+                "signals": signals,
+                "limitations": limitations,
+            }
+        if provider_metadata:
+            perspective["provider_metadata"] = provider_metadata
+            metadata["provider_metadata"] = provider_metadata
+        metadata["perspective"] = perspective
+        node["node_metadata"] = metadata
+    return nodes
+
+
 def _build_article_node_records(article: dict, session_id: str) -> tuple[list[dict], list[dict]]:
     analysis = _article_analysis_payload(article)
     intelligence = analysis.get("intelligence") if isinstance(analysis.get("intelligence"), dict) else {}
@@ -4536,7 +4578,7 @@ def _build_article_node_records(article: dict, session_id: str) -> tuple[list[di
             )
         )
 
-    return nodes, edges
+    return _apply_node_perspective_hints(nodes, intelligence), edges
 
 
 def _persist_article_node_graph(article: dict, nodes: list[dict], edges: list[dict], session_id: str) -> None:

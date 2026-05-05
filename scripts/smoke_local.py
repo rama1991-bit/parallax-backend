@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.v1.routes import analyze as analyze_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
+from app.services import analysis as analysis_service  # noqa: E402
+from app.services import intelligence as intelligence_service  # noqa: E402
 from app.services import ops_notifications as ops_notification_service  # noqa: E402
 from app.services import osint as osint_service  # noqa: E402
 from app.services import source_sync as source_sync_service  # noqa: E402
@@ -490,6 +492,7 @@ def main() -> int:
     assert article_compare["base_article"]["id"] == ingested_article_id, article_compare
     assert article_compare["similar_articles"], article_compare
     assert article_compare["comparison"]["confidence"] > 0, article_compare
+    assert article_compare["provider_metadata"]["status"] == "heuristic", article_compare
     assert store.ARTICLE_COMPARISONS, article_compare
 
     article = ExtractedArticle(
@@ -520,7 +523,176 @@ def main() -> int:
 
     card = url_analysis["card"]
     assert url_analysis["intelligence"]["article"]["title"] == "Energy market analysis", url_analysis
+    assert url_analysis["intelligence"]["provider_metadata"]["status"] == "heuristic", url_analysis
+    assert url_analysis["card"]["analysis"]["provider_metadata"]["status"] == "heuristic", url_analysis
     store.update_report_saved(card["report_id"], session_id=session_id, is_saved=True)
+
+    previous_ai_provider = analysis_service.settings.AI_PROVIDER
+    previous_openai_key = analysis_service.settings.OPENAI_API_KEY
+    previous_openai_model = analysis_service.settings.OPENAI_MODEL
+    original_openai_analysis = analysis_service._openai_analysis
+    original_openai_json = intelligence_service.openai_json
+
+    async def fake_openai_analysis(article: ExtractedArticle):
+        return {
+            "title": "Model-backed energy market analysis",
+            "source": article.source,
+            "url": article.final_url,
+            "summary": "Model-backed summary focused on market framing and source context.",
+            "key_claims": [
+                "Officials linked grid costs to market-price changes.",
+                "The article frames regulatory action as the primary response.",
+            ],
+            "narrative_framing": ["economic_consequence", "institutional_response"],
+            "entities": ["Energy Market Agency", "Grid Council"],
+            "topics": ["energy market", "grid costs"],
+            "confidence": 0.82,
+            "priority": "high",
+            "card_type": "article",
+        }
+
+    async def fake_openai_json(**kwargs):
+        task = kwargs.get("task")
+        if task == "article_intelligence":
+            return {
+                "summary": "Provider-enhanced intelligence summary for source comparison.",
+                "key_claims": [
+                    "Officials linked grid costs to market-price changes.",
+                    "The source emphasizes institutional response.",
+                ],
+                "entities": {
+                    "people": [],
+                    "organizations": ["Energy Market Agency", "Grid Council"],
+                    "locations": [],
+                    "events": ["Grid resilience plan"],
+                },
+                "narrative": {
+                    "main_frame": "institutional_response",
+                    "secondary_frames": ["economic_consequence"],
+                    "tone": "analytical",
+                    "implied_causality": "Market-price changes are presented as driving grid-cost concerns.",
+                    "missing_context": ["Independent price data is not provided in the extracted article."],
+                },
+                "source_analysis": {
+                    "source_profile": "Model-enhanced source context.",
+                    "known_angle": "Institutional and market framing.",
+                    "reliability_notes": "Provider output describes framing, not truth.",
+                    "limitations": ["Needs cross-source comparison."],
+                },
+                "comparison_hooks": {
+                    "search_queries": ["grid costs market prices official response"],
+                    "similarity_keywords": ["grid", "costs", "market", "regulator"],
+                    "event_fingerprint": "grid-costs-market-response",
+                },
+                "scores": {
+                    "importance_score": 0.81,
+                    "confidence_score": 0.82,
+                    "controversy_score": 0.52,
+                    "cross_source_need": 0.77,
+                },
+                "node_perspectives": {
+                    "article": {
+                        "summary": "Provider article-node perspective.",
+                        "signals": ["Model-backed article signal"],
+                        "limitations": ["Still not a truth verdict."],
+                    },
+                    "source": {
+                        "summary": "Provider source-node perspective.",
+                        "signals": ["Model-backed source signal"],
+                        "limitations": ["Needs source history."],
+                    },
+                    "claim": {
+                        "summary": "Provider claim-node perspective.",
+                        "signals": ["Model-backed claim signal"],
+                        "limitations": ["Needs evidence checks."],
+                    },
+                },
+            }
+        if task == "cross_source_compare":
+            return {
+                "comparison": {
+                    "shared_claims": [
+                        {
+                            "base_claim": "Officials linked grid costs to market-price changes.",
+                            "comparison_claim": "Regional coverage cites cost questions around the plan.",
+                            "similarity": 0.64,
+                        }
+                    ],
+                    "unique_claims_by_source": [
+                        {"source": "Example Daily", "claims": ["Institutional response is emphasized."]},
+                        {"source": "Regional Grid Monitor", "claims": ["Cost questions are emphasized."]},
+                    ],
+                    "framing_differences": [
+                        {
+                            "comparison_source": "Regional Grid Monitor",
+                            "shared_frames": ["institutional_response"],
+                            "base_only": ["economic_consequence"],
+                            "comparison_only": ["accountability"],
+                        }
+                    ],
+                    "tone_differences": [{"base_tone": "analytical", "comparison_tone": "skeptical"}],
+                    "missing_context": ["Neither article independently verifies cost projections."],
+                    "timeline_difference": [],
+                    "source_difference": [],
+                    "confidence": 0.74,
+                }
+            }
+        if task == "osint_context_synthesis":
+            return {
+                "risks": ["Provider-highlighted OSINT risk: references are contextual leads only."],
+                "contradictions": [
+                    {
+                        "type": "provider_context",
+                        "description": "Provider noted a need to check official data before interpretation.",
+                        "items": [],
+                    }
+                ],
+                "relevance": {
+                    "overall": 0.73,
+                    "basis": ["Provider weighted source article, archive, and public-search probes."],
+                },
+                "limitations": ["Provider synthesis does not validate claims."],
+            }
+        return {}
+
+    try:
+        analysis_service.settings.AI_PROVIDER = "openai"
+        analysis_service.settings.OPENAI_API_KEY = "smoke-openai-key"
+        analysis_service.settings.OPENAI_MODEL = "smoke-model"
+        analysis_service._openai_analysis = fake_openai_analysis
+        intelligence_service.openai_json = fake_openai_json
+        analyze_route.fetch_article = fake_success_fetch_article
+        model_url_analysis = _assert_ok(
+            client.post(
+                "/api/v1/analyze",
+                headers=headers,
+                json={"url": "https://example.com/model-analysis"},
+            ),
+            "analyze/openai-provider",
+        ).json()
+        model_compare = _assert_ok(
+            client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
+            "compare/openai-provider",
+        ).json()
+        model_osint = _assert_ok(
+            client.get(f"/api/v1/sources/articles/{ingested_article_id}/osint", headers=headers),
+            "sources/article-osint-openai-provider",
+        ).json()
+    finally:
+        analysis_service.settings.AI_PROVIDER = previous_ai_provider
+        analysis_service.settings.OPENAI_API_KEY = previous_openai_key
+        analysis_service.settings.OPENAI_MODEL = previous_openai_model
+        analysis_service._openai_analysis = original_openai_analysis
+        intelligence_service.openai_json = original_openai_json
+        analyze_route.fetch_article = original_fetch_article
+
+    assert model_url_analysis["card"]["analysis"]["provider_metadata"]["status"] == "model", model_url_analysis
+    assert model_url_analysis["intelligence"]["provider_metadata"]["status"] == "model", model_url_analysis
+    assert model_url_analysis["intelligence"]["node_perspectives"]["article"]["summary"], model_url_analysis
+    assert model_compare["provider_metadata"]["status"] == "model", model_compare
+    assert model_compare["comparison"]["confidence"] == 0.74, model_compare
+    assert model_osint["provider_metadata"]["status"] == "model", model_osint
+    assert "Provider-highlighted OSINT risk" in model_osint["risks"][0], model_osint
 
     feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
     assert len(feed["cards"]) >= 5, feed

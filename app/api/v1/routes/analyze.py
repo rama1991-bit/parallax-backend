@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.services.analysis import AIAnalysisError, analyze_article as run_article_analysis
 from app.services.articles import ArticleFetchError, ExtractedArticle, fetch_article
 from app.core.session import ANONYMOUS_SESSION_ID, get_session_id
+from app.services.intelligence import enhance_article_intelligence
 from app.services.feed.store import (
     FeedStoreError,
     QuotaExceededError,
@@ -195,6 +196,12 @@ async def analyze_url(payload: AnalyzeRequest, session_id: str = ANONYMOUS_SESSI
             analysis,
             ingested_article=ingested_article,
             fetch_warning=fetch_warning,
+        )
+        intelligence = await enhance_article_intelligence(
+            base=intelligence,
+            article=article,
+            analysis=analysis,
+            ingested_article=ingested_article,
         )
         if ingested_article:
             card = save_ingested_article_analysis_card(
