@@ -46,6 +46,7 @@ def main() -> int:
                 "error_count": result["error_count"],
                 "sync_run_id": result.get("sync_run_id"),
                 "ops_alerts": result.get("ops_alerts", {}).get("summary"),
+                "ops_alert_delivery": result.get("ops_alert_delivery", {}).get("summary"),
                 "limits": result["limits"],
             },
             indent=2,

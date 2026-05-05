@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     RETRIEVAL_PROVIDER: str = "mock"
     EXTERNAL_RETRIEVAL_ENABLED: bool = False
+    OPS_NOTIFICATIONS_ENABLED: bool = False
+    OPS_WEBHOOK_URL: str | None = None
+    OPS_WEBHOOK_SECRET: str | None = None
+    OPS_NOTIFICATION_MIN_SEVERITY: str = "warning"
+    OPS_NOTIFICATION_TIMEOUT_SECONDS: float = 5.0
     ARTICLE_FETCH_TIMEOUT_SECONDS: float = 15.0
     ARTICLE_MAX_CHARS: int = 12000
     ANALYZE_QUOTA_ENABLED: bool = True

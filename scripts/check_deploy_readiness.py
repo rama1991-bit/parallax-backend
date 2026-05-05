@@ -24,6 +24,9 @@ PRODUCTION_ENV_VARS = [
     "DATABASE_SSLMODE=require",
     "FRONTEND_URL=https://your-frontend.example.com",
     "AI_PROVIDER=heuristic|openai",
+    "OPS_NOTIFICATIONS_ENABLED=false|true",
+    "OPS_WEBHOOK_URL=https://hooks.example.com/parallax",
+    "OPS_NOTIFICATION_MIN_SEVERITY=warning",
 ]
 
 
@@ -69,6 +72,11 @@ def _has_sslmode(database_url: str) -> bool:
 
 def _origin_is_valid(origin: str) -> bool:
     parsed = urlparse(origin)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _webhook_url_is_valid(url: str) -> bool:
+    parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
@@ -121,6 +129,10 @@ def build_report(strict: bool = False) -> dict[str, Any]:
     ]
     ai_provider = _compact(settings.AI_PROVIDER).lower() or "heuristic"
     retrieval_provider = _compact(settings.RETRIEVAL_PROVIDER).lower() or "mock"
+    ops_notifications_enabled = _is_truthy(settings.OPS_NOTIFICATIONS_ENABLED)
+    ops_webhook_url = _compact(settings.OPS_WEBHOOK_URL)
+    ops_webhook = urlparse(ops_webhook_url)
+    ops_min_severity = _compact(settings.OPS_NOTIFICATION_MIN_SEVERITY).lower() or "warning"
 
     if production_like and env != "production":
         _issue(
@@ -321,6 +333,61 @@ def build_report(strict: bool = False) -> dict[str, Any]:
             "RETRIEVAL_PROVIDER",
             f"Unsupported RETRIEVAL_PROVIDER: {settings.RETRIEVAL_PROVIDER!r}.",
             "Use RETRIEVAL_PROVIDER=mock for deterministic probes or RETRIEVAL_PROVIDER=web for public web search.",
+        )
+
+    if ops_min_severity not in {"info", "warning", "critical"}:
+        _issue(
+            errors,
+            "error",
+            "OPS_NOTIFICATION_MIN_SEVERITY",
+            f"Unsupported OPS_NOTIFICATION_MIN_SEVERITY: {settings.OPS_NOTIFICATION_MIN_SEVERITY!r}.",
+            "Use info, warning, or critical.",
+        )
+
+    if ops_notifications_enabled:
+        if not ops_webhook_url or not _webhook_url_is_valid(ops_webhook_url):
+            _fail_or_warn(
+                errors,
+                warnings,
+                production_like,
+                "OPS_WEBHOOK_URL",
+                "OPS_NOTIFICATIONS_ENABLED=true but OPS_WEBHOOK_URL is missing or invalid.",
+                "Set OPS_WEBHOOK_URL to an HTTP/HTTPS endpoint that can receive source operational alerts.",
+            )
+        elif production_like and (
+            ops_webhook.scheme != "https" or _is_local_host(ops_webhook.hostname)
+        ):
+            _issue(
+                errors,
+                "error",
+                "OPS_WEBHOOK_URL",
+                "OPS_WEBHOOK_URL is local or not HTTPS for a production-like readiness check.",
+                "Use a public HTTPS webhook endpoint for production alert delivery.",
+            )
+        if not _compact(settings.OPS_WEBHOOK_SECRET):
+            _issue(
+                warnings,
+                "warning",
+                "OPS_WEBHOOK_SECRET",
+                "OPS notifications are enabled without a webhook signing secret.",
+                "Set OPS_WEBHOOK_SECRET so receivers can verify X-Parallax-Signature.",
+            )
+    elif production_like:
+        _issue(
+            warnings,
+            "warning",
+            "OPS_NOTIFICATIONS_ENABLED",
+            "Source operational alerts will remain internal only.",
+            "Set OPS_NOTIFICATIONS_ENABLED=true and OPS_WEBHOOK_URL when production alert delivery is required.",
+        )
+
+    if settings.OPS_NOTIFICATION_TIMEOUT_SECONDS <= 0:
+        _issue(
+            errors,
+            "error",
+            "OPS_NOTIFICATION_TIMEOUT_SECONDS",
+            "OPS_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero.",
+            "Use a small positive timeout such as 5.",
         )
 
     status = "ready" if not errors else "blocked"

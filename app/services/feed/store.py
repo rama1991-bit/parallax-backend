@@ -37,6 +37,7 @@ SOURCE_FEEDS = []
 INGESTED_ARTICLES = []
 SOURCE_SYNC_RUNS = []
 SOURCE_OPS_ALERTS = []
+SOURCE_OPS_ALERT_DELIVERIES = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -70,6 +71,7 @@ _SOURCE_REVIEW_STATUSES = {"needs_review", "reviewed", "quarantined", "disabled"
 _SOURCE_FEED_STATUSES = {"active", "paused", "quarantined", "disabled"}
 _SOURCE_OPS_ALERT_SEVERITIES = {"info", "warning", "critical"}
 _SOURCE_OPS_ALERT_STATUSES = {"active", "acknowledged", "resolved"}
+_SOURCE_OPS_DELIVERY_STATUSES = {"delivered", "failed", "skipped"}
 
 
 def now_iso():
@@ -421,6 +423,23 @@ def _ensure_schema():
                         acknowledged_at timestamptz,
                         resolved_at timestamptz
                     );
+
+                    create table if not exists public.source_ops_alert_deliveries (
+                        id uuid primary key,
+                        alert_id uuid not null references public.source_ops_alerts(id) on delete cascade,
+                        alert_updated_at timestamptz,
+                        destination_type text not null default 'webhook',
+                        destination_url text,
+                        status text not null default 'failed' check (
+                            status in ('delivered', 'failed', 'skipped')
+                        ),
+                        attempt_count integer not null default 1,
+                        response_status integer,
+                        error text,
+                        payload jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        delivered_at timestamptz
+                    );
                     """
                 )
 
@@ -671,6 +690,32 @@ def _ensure_schema():
                         acknowledged_at timestamptz,
                         resolved_at timestamptz
                     );
+                    """,
+                    """
+                    create table if not exists public.source_ops_alert_deliveries (
+                        id uuid primary key,
+                        alert_id uuid not null references public.source_ops_alerts(id) on delete cascade,
+                        alert_updated_at timestamptz,
+                        destination_type text not null default 'webhook',
+                        destination_url text,
+                        status text not null default 'failed' check (
+                            status in ('delivered', 'failed', 'skipped')
+                        ),
+                        attempt_count integer not null default 1,
+                        response_status integer,
+                        error text,
+                        payload jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        delivered_at timestamptz
+                    );
+                    """,
+                    """
+                    create index if not exists idx_source_ops_alert_deliveries_alert_created
+                    on public.source_ops_alert_deliveries (alert_id, created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_ops_alert_deliveries_status_created
+                    on public.source_ops_alert_deliveries (status, created_at desc);
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -2789,6 +2834,11 @@ def _normalize_ops_alert_status(value: str | None) -> str:
     return clean if clean in _SOURCE_OPS_ALERT_STATUSES else "active"
 
 
+def _normalize_ops_delivery_status(value: str | None) -> str:
+    clean = _clean_text(value, 40) or "failed"
+    return clean if clean in _SOURCE_OPS_DELIVERY_STATUSES else "failed"
+
+
 def _ops_alert_key(
     alert_type: str,
     source_id: str | None = None,
@@ -3003,6 +3053,255 @@ def acknowledge_source_ops_alert(alert_id: str) -> dict | None:
                 return _row_to_source_ops_alert(row) if row else None
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not acknowledge source ops alert: {exc}") from exc
+
+
+def get_source_ops_alert(alert_id: str) -> dict | None:
+    if not database_enabled():
+        alert = next((item for item in SOURCE_OPS_ALERTS if item.get("id") == alert_id), None)
+        return dict(alert) if alert else None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select *
+                    from public.source_ops_alerts
+                    where id::text = %s;
+                    """,
+                    (alert_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_source_ops_alert(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load source ops alert: {exc}") from exc
+
+
+def _row_to_source_ops_alert_delivery(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "alert_id": str(row.get("alert_id")) if row.get("alert_id") else None,
+        "alert_updated_at": _datetime_iso(row.get("alert_updated_at")),
+        "destination_type": row.get("destination_type") or "webhook",
+        "destination_url": row.get("destination_url"),
+        "status": row.get("status") or "failed",
+        "attempt_count": int(row.get("attempt_count") or 1),
+        "response_status": int(row.get("response_status")) if row.get("response_status") is not None else None,
+        "error": row.get("error"),
+        "payload": row.get("payload") or {},
+        "created_at": _row_created_at(row),
+        "delivered_at": _datetime_iso(row.get("delivered_at")),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "alert_severity": row.get("alert_severity"),
+        "alert_title": row.get("alert_title"),
+    }
+
+
+def record_source_ops_alert_delivery(
+    *,
+    alert_id: str,
+    alert_updated_at: str | None = None,
+    destination_type: str = "webhook",
+    destination_url: str | None = None,
+    status: str = "failed",
+    attempt_count: int = 1,
+    response_status: int | None = None,
+    error: str | None = None,
+    payload: dict | None = None,
+) -> dict:
+    clean_status = _normalize_ops_delivery_status(status)
+    clean_destination_type = _clean_text(destination_type, 80, "webhook")
+    clean_destination_url = _clean_text(destination_url, 1000)
+    clean_error = _clean_text(error, 1200)
+    alert_updated = _datetime_iso(alert_updated_at)
+    now = now_iso()
+    delivered_at = now if clean_status == "delivered" else None
+    record = {
+        "id": str(uuid4()),
+        "alert_id": alert_id,
+        "alert_updated_at": alert_updated,
+        "destination_type": clean_destination_type,
+        "destination_url": clean_destination_url,
+        "status": clean_status,
+        "attempt_count": max(1, int(attempt_count or 1)),
+        "response_status": response_status,
+        "error": clean_error,
+        "payload": payload or {},
+        "created_at": now,
+        "delivered_at": delivered_at,
+    }
+
+    if not database_enabled():
+        SOURCE_OPS_ALERT_DELIVERIES.insert(0, record)
+        return record
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_ops_alert_deliveries (
+                        id, alert_id, alert_updated_at, destination_type,
+                        destination_url, status, attempt_count, response_status,
+                        error, payload, created_at, delivered_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(),
+                        case when %s = 'delivered' then now() else null end
+                    )
+                    returning *;
+                    """,
+                    (
+                        record["id"],
+                        alert_id,
+                        alert_updated,
+                        clean_destination_type,
+                        clean_destination_url,
+                        clean_status,
+                        record["attempt_count"],
+                        response_status,
+                        clean_error,
+                        Json(payload or {}),
+                        clean_status,
+                    ),
+                )
+                return _row_to_source_ops_alert_delivery(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not record source ops alert delivery: {exc}") from exc
+
+
+def list_source_ops_alert_deliveries(
+    *,
+    alert_id: str | None = None,
+    source_id: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 50), 250))
+    clean_status = _clean_text(status, 40)
+
+    if not database_enabled():
+        alerts_by_id = {alert.get("id"): alert for alert in SOURCE_OPS_ALERTS}
+
+        def matches(delivery: dict) -> bool:
+            alert = alerts_by_id.get(delivery.get("alert_id")) or {}
+            return (
+                (not alert_id or delivery.get("alert_id") == alert_id)
+                and (not source_id or alert.get("source_id") == source_id)
+                and (not clean_status or delivery.get("status") == clean_status)
+            )
+
+        deliveries = []
+        for delivery in SOURCE_OPS_ALERT_DELIVERIES:
+            if not matches(delivery):
+                continue
+            alert = alerts_by_id.get(delivery.get("alert_id")) or {}
+            deliveries.append(
+                {
+                    **delivery,
+                    "source_id": alert.get("source_id"),
+                    "source_feed_id": alert.get("source_feed_id"),
+                    "alert_severity": alert.get("severity"),
+                    "alert_title": alert.get("title"),
+                }
+            )
+        return sorted(deliveries, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if alert_id:
+        where.append("d.alert_id::text = %s")
+        params.append(alert_id)
+    if source_id:
+        where.append("a.source_id::text = %s")
+        params.append(source_id)
+    if clean_status:
+        where.append("d.status = %s")
+        params.append(clean_status)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select
+                        d.*,
+                        a.source_id,
+                        a.source_feed_id,
+                        a.severity as alert_severity,
+                        a.title as alert_title
+                    from public.source_ops_alert_deliveries d
+                    join public.source_ops_alerts a on a.id = d.alert_id
+                    {where_sql}
+                    order by d.created_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_ops_alert_delivery(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source ops alert deliveries: {exc}") from exc
+
+
+def latest_source_ops_alert_delivery(alert_id: str) -> dict | None:
+    deliveries = list_source_ops_alert_deliveries(alert_id=alert_id, limit=1)
+    return deliveries[0] if deliveries else None
+
+
+def attach_source_ops_alert_delivery_status(alerts: list[dict]) -> list[dict]:
+    if not alerts:
+        return []
+
+    alert_ids = [alert.get("id") for alert in alerts if alert.get("id")]
+    latest_by_alert: dict[str, dict] = {}
+
+    if not database_enabled():
+        for delivery in SOURCE_OPS_ALERT_DELIVERIES:
+            alert_id = delivery.get("alert_id")
+            if alert_id in alert_ids and alert_id not in latest_by_alert:
+                latest_by_alert[alert_id] = delivery
+    else:
+        _ensure_schema()
+        try:
+            with _connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        select distinct on (d.alert_id)
+                            d.*,
+                            a.source_id,
+                            a.source_feed_id,
+                            a.severity as alert_severity,
+                            a.title as alert_title
+                        from public.source_ops_alert_deliveries d
+                        join public.source_ops_alerts a on a.id = d.alert_id
+                        where d.alert_id::text = any(%s)
+                        order by d.alert_id, d.created_at desc;
+                        """,
+                        (alert_ids,),
+                    )
+                    latest_by_alert = {
+                        str(row.get("alert_id")): _row_to_source_ops_alert_delivery(row)
+                        for row in cur.fetchall()
+                    }
+        except psycopg2.Error as exc:
+            raise FeedStoreError(f"Could not attach source ops alert delivery status: {exc}") from exc
+
+    enriched = []
+    for alert in alerts:
+        delivery = latest_by_alert.get(alert.get("id"))
+        enriched.append(
+            {
+                **alert,
+                "delivery_status": (delivery or {}).get("status") or "not_sent",
+                "delivery": delivery,
+            }
+        )
+    return enriched
 
 
 def _source_ops_alert_payload(

@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.v1.routes import analyze as analyze_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
+from app.services import ops_notifications as ops_notification_service  # noqa: E402
 from app.services import osint as osint_service  # noqa: E402
 from app.services import source_sync as source_sync_service  # noqa: E402
 from app.services.feed import store  # noqa: E402
@@ -45,6 +46,7 @@ def _reset_memory_store() -> None:
         store.INGESTED_ARTICLES,
         store.SOURCE_SYNC_RUNS,
         store.SOURCE_OPS_ALERTS,
+        store.SOURCE_OPS_ALERT_DELIVERIES,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -286,8 +288,62 @@ def main() -> int:
         "sources/ops-alerts",
     ).json()["alerts"]
     assert any(alert["alert_type"] == "source_disabled" for alert in ops_alerts), ops_alerts
+    assert "delivery_status" in ops_alerts[0], ops_alerts
     denied_ops_alerts = client.get("/api/v1/sources/ops/alerts", headers=headers)
     assert denied_ops_alerts.status_code == 403, denied_ops_alerts.text
+    denied_ops_delivery = client.post("/api/v1/sources/ops/alerts/deliver", headers=headers)
+    assert denied_ops_delivery.status_code == 403, denied_ops_delivery.text
+
+    previous_ops_enabled = ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED
+    previous_ops_url = ops_notification_service.settings.OPS_WEBHOOK_URL
+    previous_ops_secret = ops_notification_service.settings.OPS_WEBHOOK_SECRET
+    original_post_webhook = ops_notification_service._post_webhook
+
+    async def fake_post_webhook(url: str, payload: dict):
+        assert url == "https://hooks.example.test/parallax"
+        assert payload["event"] == "source_ops_alert"
+        return {"status": "delivered", "response_status": 202, "error": None}
+
+    async def fake_failed_post_webhook(url: str, payload: dict):
+        return {"status": "failed", "response_status": 503, "error": "Fixture webhook failure."}
+
+    try:
+        ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = True
+        ops_notification_service.settings.OPS_WEBHOOK_URL = "https://hooks.example.test/parallax"
+        ops_notification_service.settings.OPS_WEBHOOK_SECRET = "smoke-webhook-secret"
+        ops_notification_service._post_webhook = fake_post_webhook
+        delivered_ops_alerts = _assert_ok(
+            client.post("/api/v1/sources/ops/alerts/deliver?limit=25", headers=admin_headers),
+            "sources/ops-alerts-deliver",
+        ).json()
+        assert delivered_ops_alerts["delivery_count"] >= 1, delivered_ops_alerts
+        assert delivered_ops_alerts["summary"]["delivered"] >= 1, delivered_ops_alerts
+        deliveries = _assert_ok(
+            client.get("/api/v1/sources/ops/alerts/deliveries", headers=admin_headers),
+            "sources/ops-alert-deliveries",
+        ).json()
+        assert deliveries["summary"]["delivered"] >= 1, deliveries
+        delivered_list_alerts = _assert_ok(
+            client.get("/api/v1/sources/ops/alerts", headers=admin_headers),
+            "sources/ops-alerts-with-delivery",
+        ).json()["alerts"]
+        assert any(alert["delivery_status"] == "delivered" for alert in delivered_list_alerts), delivered_list_alerts
+
+        ops_notification_service._post_webhook = fake_failed_post_webhook
+        failed_ops_alert = _assert_ok(
+            client.post(
+                f"/api/v1/sources/ops/alerts/deliver?alert_id={ops_alerts[0]['id']}&force=true",
+                headers=admin_headers,
+            ),
+            "sources/ops-alert-deliver-failure",
+        ).json()
+        assert failed_ops_alert["summary"]["failed"] == 1, failed_ops_alert
+    finally:
+        ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = previous_ops_enabled
+        ops_notification_service.settings.OPS_WEBHOOK_URL = previous_ops_url
+        ops_notification_service.settings.OPS_WEBHOOK_SECRET = previous_ops_secret
+        ops_notification_service._post_webhook = original_post_webhook
+
     acknowledged_ops_alert = _assert_ok(
         client.post(f"/api/v1/sources/ops/alerts/{ops_alerts[0]['id']}/acknowledge", headers=admin_headers),
         "sources/ops-alert-acknowledge",
@@ -295,6 +351,10 @@ def main() -> int:
     assert acknowledged_ops_alert["status"] == "acknowledged", acknowledged_ops_alert
 
     original_parse_rss_feed = source_sync_service.parse_rss_feed
+    previous_ops_enabled_scheduler = ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED
+    previous_ops_url_scheduler = ops_notification_service.settings.OPS_WEBHOOK_URL
+    previous_ops_secret_scheduler = ops_notification_service.settings.OPS_WEBHOOK_SECRET
+    original_post_webhook_scheduler = ops_notification_service._post_webhook
 
     async def fake_parse_rss_feed(url: str, limit: int = 20):
         article_url = (
@@ -320,6 +380,10 @@ def main() -> int:
 
     try:
         source_sync_service.parse_rss_feed = fake_parse_rss_feed
+        ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = True
+        ops_notification_service.settings.OPS_WEBHOOK_URL = "https://hooks.example.test/parallax"
+        ops_notification_service.settings.OPS_WEBHOOK_SECRET = "smoke-webhook-secret"
+        ops_notification_service._post_webhook = fake_failed_post_webhook
         active_sync = _assert_ok(
             client.post(
                 "/api/v1/sources/sync-active?source_limit=2&feed_limit=2&article_limit=2&card_limit=2",
@@ -338,11 +402,16 @@ def main() -> int:
         ).json()
     finally:
         source_sync_service.parse_rss_feed = original_parse_rss_feed
+        ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = previous_ops_enabled_scheduler
+        ops_notification_service.settings.OPS_WEBHOOK_URL = previous_ops_url_scheduler
+        ops_notification_service.settings.OPS_WEBHOOK_SECRET = previous_ops_secret_scheduler
+        ops_notification_service._post_webhook = original_post_webhook_scheduler
 
     assert len(ingested["articles"]) == 1, ingested
     assert len(ingested["cards"]) == 1, ingested
     assert ingested["status"] == "completed", ingested
     assert ingested["sync_run_id"], ingested
+    assert "ops_alert_delivery" in active_sync, active_sync
     ingested_article_id = ingested["articles"][0]["id"]
 
     sync_runs = _assert_ok(

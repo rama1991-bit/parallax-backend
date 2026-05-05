@@ -17,7 +17,7 @@ This deployable MVP includes:
 - Phase 2 node-based article detail, article-id comparisons, bounded OSINT context, and default source seeds
 - source ingestion observability with sync-run history and source health summaries
 - source quality governance with review statuses, quality scores, and feed quarantine controls
-- source operational alerts and env-driven OSINT retrieval providers
+- source operational alerts, webhook delivery attempts, and env-driven OSINT retrieval providers
 
 Run locally:
 
@@ -62,7 +62,7 @@ python scripts/check_deploy_readiness.py --json
 python scripts/check_deploy_readiness.py --strict
 ```
 
-The readiness script validates production-critical configuration without opening a database connection. It checks production env posture, signed-token/admin secrets, Postgres/Supabase settings, SSL mode, frontend/CORS origins, AI provider settings, quota/fetch limits, OSINT retrieval posture, and prints the recommended recurring source-ingestion scheduler command.
+The readiness script validates production-critical configuration without opening a database connection. It checks production env posture, signed-token/admin secrets, Postgres/Supabase settings, SSL mode, frontend/CORS origins, AI provider settings, quota/fetch limits, OSINT retrieval posture, ops notification posture, and prints the recommended recurring source-ingestion scheduler command.
 
 Analyze flow:
 
@@ -135,6 +135,10 @@ curl http://localhost:8000/api/v1/sources/ops/alerts \
   -H "X-Parallax-Admin-Key: <admin_api_key>"
 curl -X POST http://localhost:8000/api/v1/sources/ops/alerts/evaluate \
   -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl -X POST http://localhost:8000/api/v1/sources/ops/alerts/deliver \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
+curl http://localhost:8000/api/v1/sources/ops/alerts/deliveries \
+  -H "X-Parallax-Admin-Key: <admin_api_key>"
 curl -X POST http://localhost:8000/api/v1/sources/ops/alerts/<alert_id>/acknowledge \
   -H "X-Parallax-Admin-Key: <admin_api_key>"
 curl -X POST http://localhost:8000/api/v1/sources/<source_id>/review \
@@ -160,7 +164,7 @@ curl http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint
 curl "http://localhost:8000/api/v1/sources/articles/<ingested_article_id>/osint?include_external=true&limit=5"
 ```
 
-Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed, sync, sync-run history, review, quality, feed governance, and operational alert API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits, per-feed error isolation, JSON scheduler output, `source_sync_runs` logging, source health summaries, and source operational alert evaluation. Source list/detail responses include health fields such as status, last success, last error, success rate, articles in the last 24 hours, review status, and quality score. Feed statuses can be `active`, `paused`, `quarantined`, or `disabled`; only active RSS feeds are ingested. Source review statuses can be `needs_review`, `reviewed`, `quarantined`, or `disabled`; quarantined/disabled sources are skipped by ingestion. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. OSINT external retrieval is provider-based: `RETRIEVAL_PROVIDER=mock` produces deterministic probes, while `RETRIEVAL_PROVIDER=web` fetches public web search results when `EXTERNAL_RETRIEVAL_ENABLED=true`. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
+Source sync parses active RSS feeds into `ingested_articles` and creates lightweight `ingested_article` cards for the smart feed. Default source seeding is idempotent and creates multilingual source records plus RSS feed records where a public feed is known. Seed, sync, sync-run history, review, quality, feed governance, operational alert, and alert-delivery API routes require `X-Parallax-Admin-Key`; direct scripts use backend environment access instead. `sync-active` and `scripts/sync_active_sources.py` provide the scheduler-friendly ingestion runner with source/feed/article/card limits, per-feed error isolation, JSON scheduler output, `source_sync_runs` logging, source health summaries, source operational alert evaluation, and best-effort alert delivery summaries. Alert delivery posts active alerts at or above `OPS_NOTIFICATION_MIN_SEVERITY` to `OPS_WEBHOOK_URL`, records each attempt in `source_ops_alert_deliveries`, signs payloads with `X-Parallax-Signature` when `OPS_WEBHOOK_SECRET` is set, and never fails the scheduler when a webhook is down. Source list/detail responses include health fields such as status, last success, last error, success rate, articles in the last 24 hours, review status, and quality score. Feed statuses can be `active`, `paused`, `quarantined`, or `disabled`; only active RSS feeds are ingested. Source review statuses can be `needs_review`, `reviewed`, `quarantined`, or `disabled`; quarantined/disabled sources are skipped by ingestion. Article detail returns the article, source, source feed, analysis, intelligence payload, hydrated feed card, comparison hooks, node preview, materialized `node_graph`, and bounded `osint_context`. The nodes endpoint returns article, source, author, topic, event/background, claim, narrative, and entity perspectives with edges. The OSINT endpoint returns contextual references, source types, reliability levels, relevance, risks, contradictions, and citations. OSINT external retrieval is provider-based: `RETRIEVAL_PROVIDER=mock` produces deterministic probes, while `RETRIEVAL_PROVIDER=web` fetches public web search results when `EXTERNAL_RETRIEVAL_ENABLED=true`. Homepage and manual source entries are stored now; recurring homepage crawling is intentionally left for a later step.
 
 Recurring ingestion scheduler:
 
@@ -216,6 +220,11 @@ Environment:
 - `ANALYZE_COOLDOWN_SECONDS`: minimum wait between analyze requests for the same session.
 - `EXTERNAL_RETRIEVAL_ENABLED`: when true, OSINT can fetch public web search results for bounded context; default is false.
 - `RETRIEVAL_PROVIDER`: `mock` for deterministic OSINT probes, or `web` for public web search retrieval when external retrieval is enabled.
+- `OPS_NOTIFICATIONS_ENABLED`: enables best-effort source operational alert webhook delivery; default is false.
+- `OPS_WEBHOOK_URL`: HTTP/HTTPS endpoint for receiving source operational alerts.
+- `OPS_WEBHOOK_SECRET`: optional HMAC secret used to set `X-Parallax-Signature: sha256=<digest>`.
+- `OPS_NOTIFICATION_MIN_SEVERITY`: minimum alert severity to deliver: `info`, `warning`, or `critical`.
+- `OPS_NOTIFICATION_TIMEOUT_SECONDS`: bounded webhook timeout in seconds.
 
 Database setup:
 
@@ -241,7 +250,8 @@ Phase 2 implementation status:
 - Production hardening 4 complete: `source_sync_runs`, sync-run endpoints, source health summaries, scheduler JSON run IDs, and smoke coverage make ingestion observable.
 - Production hardening 5 complete: source review status, quality scoring, review queue, feed pause/quarantine/disable controls, and ingestion skip behavior make source governance manageable.
 - Production hardening 6 complete: source operational alerts, scheduler alert summaries, alert acknowledgement, and OSINT retrieval provider boundaries are in place.
-- Next work should add real deployment scheduler configuration and production notification delivery.
+- Production hardening 7 complete: source operational alerts can be delivered to signed webhooks, delivery attempts are persisted, scheduler output includes delivery summaries, and admin APIs expose delivery history.
+- Next work should add real model-backed intelligence providers and production scheduler configuration templates for the selected host.
 
 Production deploy checklist:
 
@@ -251,7 +261,7 @@ Production deploy checklist:
 4. Run `python scripts/apply_migrations.py` before serving production traffic.
 5. Run `python scripts/smoke_local.py` locally, then optionally `PARALLAX_SMOKE_USE_CONFIG_DB=true python scripts/smoke_local.py` against a staging database.
 6. Deploy backend, confirm `/api/v1/health` and `/api/v1/health/db`.
-7. Configure a recurring worker for `python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25`, or a protected HTTP job for `POST /api/v1/sources/sync-active`.
+7. Configure a recurring worker for `python scripts/sync_active_sources.py --source-limit 50 --feed-limit 100 --article-limit 10 --card-limit 25`, or a protected HTTP job for `POST /api/v1/sources/sync-active`. Set `OPS_NOTIFICATIONS_ENABLED=true` and `OPS_WEBHOOK_URL` when operational alerts should leave the app.
 8. Set frontend `NEXT_PUBLIC_API_URL` to the backend origin and deploy the frontend.
 9. Confirm one browser session can complete onboarding, analyze or ingest a source, view alerts, open sources, save a report, and generate a brief.
 

@@ -13,6 +13,7 @@ from app.services.feed.store import (
     save_ingested_articles,
     update_source_feed_sync_result,
 )
+from app.services.ops_notifications import safely_deliver_source_ops_alerts
 from app.services.rss import RSSSyncError, parse_rss_feed
 
 
@@ -46,6 +47,10 @@ def _safe_evaluate_ops_alerts(**kwargs) -> dict | None:
         return evaluate_source_ops_alerts(**kwargs)
     except FeedStoreError:
         return None
+
+
+async def _safe_deliver_ops_alerts(**kwargs) -> dict | None:
+    return await safely_deliver_source_ops_alerts(**kwargs)
 
 
 def _skipped_source_result(source: dict, session_id: str, started_at: datetime, reason: str) -> dict:
@@ -108,18 +113,25 @@ async def sync_source_feeds(
     article_limit: int = 20,
     card_limit: int = 10,
     feed_limit: int = 25,
+    deliver_ops_alerts: bool = True,
 ) -> dict:
     started_at = datetime.now(timezone.utc)
     source = get_source_record(source_id)
     if not source:
         raise FeedStoreError("Source not found.")
     if source.get("review_status") in {"quarantined", "disabled"}:
-        return _skipped_source_result(
+        skipped = _skipped_source_result(
             source,
             session_id=session_id,
             started_at=started_at,
             reason=f"Source review status is {source.get('review_status')}.",
         )
+        if deliver_ops_alerts and skipped.get("ops_alerts"):
+            skipped["ops_alert_delivery"] = await _safe_deliver_ops_alerts(
+                source_id=source_id,
+                sync_run_id=skipped.get("sync_run_id"),
+            )
+        return skipped
 
     max_articles = _clamp(article_limit, default=20, minimum=1, maximum=50)
     max_cards = _clamp(card_limit, default=10, minimum=0, maximum=50)
@@ -222,6 +234,11 @@ async def sync_source_feeds(
             source_id=source_id,
             sync_run_id=run["id"],
         )
+        if deliver_ops_alerts:
+            result["ops_alert_delivery"] = await _safe_deliver_ops_alerts(
+                source_id=source_id,
+                sync_run_id=run["id"],
+            )
     else:
         result["sync_run_log_error"] = "Sync completed but run logging failed."
     return result
@@ -261,6 +278,7 @@ async def sync_active_source_feeds(
             article_limit=max_articles,
             card_limit=remaining_cards,
             feed_limit=remaining_feeds,
+            deliver_ops_alerts=False,
         )
         feed_count += result["rss_feed_count"]
         articles.extend(result["articles"])
@@ -330,6 +348,10 @@ async def sync_active_source_feeds(
         result["sync_run"] = run
         result["sync_run_id"] = run["id"]
         result["ops_alerts"] = _safe_evaluate_ops_alerts(sync_run_id=run["id"], limit=max_sources)
+        result["ops_alert_delivery"] = await _safe_deliver_ops_alerts(
+            sync_run_id=run["id"],
+            limit=max_sources,
+        )
     else:
         result["sync_run_log_error"] = "Sync completed but run logging failed."
     return result

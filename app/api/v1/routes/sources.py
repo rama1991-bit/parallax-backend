@@ -8,6 +8,7 @@ from app.core.session import get_session_id
 from app.services.default_sources import preview_default_sources, seed_default_sources
 from app.services.feed.store import (
     FeedStoreError,
+    attach_source_ops_alert_delivery_status,
     attach_source_health,
     attach_sources_health,
     build_article_node_graph,
@@ -22,6 +23,7 @@ from app.services.feed.store import (
     get_source_record,
     list_ingested_article_records,
     list_source_feed_records,
+    list_source_ops_alert_deliveries,
     list_source_ops_alerts,
     list_source_records,
     list_sources_needing_review,
@@ -30,6 +32,7 @@ from app.services.feed.store import (
     update_source_feed_governance,
     update_source_review_status,
 )
+from app.services.ops_notifications import deliver_source_ops_alerts
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
@@ -235,6 +238,7 @@ async def list_source_operational_alerts(
             severity=severity,
             limit=limit,
         )
+        alerts = attach_source_ops_alert_delivery_status(alerts)
         return {
             "alerts": alerts,
             "summary": {
@@ -256,6 +260,53 @@ async def evaluate_source_operational_alerts(
 ):
     try:
         return evaluate_source_ops_alerts(source_id=source_id, limit=limit)
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/ops/alerts/deliver")
+async def deliver_source_operational_alerts(
+    limit: int = Query(default=50, ge=1, le=250),
+    alert_id: str | None = None,
+    source_id: str | None = None,
+    force: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await deliver_source_ops_alerts(
+            alert_id=alert_id,
+            source_id=source_id,
+            limit=limit,
+            force=force,
+        )
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/ops/alerts/deliveries")
+async def list_source_operational_alert_deliveries(
+    limit: int = Query(default=50, ge=1, le=250),
+    alert_id: str | None = None,
+    source_id: str | None = None,
+    status: str | None = None,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        deliveries = list_source_ops_alert_deliveries(
+            alert_id=alert_id,
+            source_id=source_id,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "deliveries": deliveries,
+            "summary": {
+                "delivery_count": len(deliveries),
+                "delivered": len([item for item in deliveries if item.get("status") == "delivered"]),
+                "failed": len([item for item in deliveries if item.get("status") == "failed"]),
+                "skipped": len([item for item in deliveries if item.get("status") == "skipped"]),
+            },
+        }
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
