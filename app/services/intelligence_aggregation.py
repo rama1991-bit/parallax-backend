@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import re
 from typing import Any
+from uuid import uuid4
 
 from app.core.session import ANONYMOUS_SESSION_ID
 from app.services import intelligence as intelligence_provider
@@ -12,9 +13,12 @@ from app.services.feed.store import (
     get_latest_intelligence_snapshot,
     get_source_record,
     list_ingested_article_records,
+    list_intelligence_refresh_runs,
     list_source_records,
     list_topics,
+    save_generated_feed_cards,
     save_intelligence_snapshot,
+    save_intelligence_refresh_run,
 )
 
 
@@ -628,6 +632,181 @@ def _save_snapshot(kind: str, subject_id: str, title: str | None, payload: dict)
     return _attach_snapshot(payload, snapshot)
 
 
+def _card_link(kind: str, subject: dict) -> str:
+    subject_id = subject.get("id")
+    if kind == "source" and subject_id:
+        return f"/sources/{subject_id}"
+    if kind == "topic" and subject_id:
+        return f"/topics/{subject_id}"
+    return "/"
+
+
+def _card_subject_name(subject: dict) -> str:
+    return intelligence_provider.clean_text(subject.get("name") or subject.get("id"), limit=160, fallback="Intelligence")
+
+
+def _card_base_payload(payload: dict, run_id: str | None) -> dict:
+    subject = _dict(payload.get("subject"))
+    sample = _dict(payload.get("sample"))
+    framing = _dict(payload.get("framing_pattern"))
+    return {
+        "intelligence_card": True,
+        "intelligence_refresh_run_id": run_id,
+        "intelligence_snapshot_id": (_dict(payload.get("snapshot"))).get("id"),
+        "snapshot_type": payload.get("snapshot_type"),
+        "subject": subject,
+        "sample": sample,
+        "provider_metadata": payload.get("provider_metadata") or {},
+        "dominant_frame": (framing.get("dominant_frames") or [None])[0],
+        "claim_count": len(payload.get("recurring_claims") or []),
+        "recurring_claims": payload.get("recurring_claims") or [],
+        "weak_spots": payload.get("weak_spots") or [],
+    }
+
+
+def _build_intelligence_feed_cards(
+    *,
+    kind: str,
+    payload: dict,
+    session_id: str,
+    run_id: str | None,
+) -> list[dict]:
+    subject = _dict(payload.get("subject"))
+    sample = _dict(payload.get("sample"))
+    snapshot = _dict(payload.get("snapshot"))
+    subject_name = _card_subject_name(subject)
+    article_count = int(sample.get("article_count") or 0)
+    recurring_claims = intelligence_provider.safe_list(payload.get("recurring_claims") or [], limit=8)
+    weak_spots = intelligence_provider.safe_list(payload.get("weak_spots") or [], limit=8)
+    status = payload.get("status") or "ready"
+    href = _card_link(kind, subject)
+    dominant_frame = (_dict(payload.get("framing_pattern")).get("dominant_frames") or [None])[0]
+    card_type = "coverage_gap" if status == "empty" or not article_count else (
+        "source_pattern" if kind == "source" else "topic_shift"
+    )
+    priority = 0.74 if recurring_claims else 0.66 if article_count else 0.58
+    source_id = subject.get("id") if kind == "source" else None
+    topic_id = subject.get("id") if kind == "topic" else None
+    topic_label = "Source intelligence" if kind == "source" else subject_name
+    summary = intelligence_provider.clean_text(payload.get("summary"), limit=900)
+    if card_type == "coverage_gap" and weak_spots:
+        summary = weak_spots[0]
+
+    cards = [
+        {
+            "id": str(uuid4()),
+            "session_id": session_id,
+            "topic_id": topic_id,
+            "source_id": source_id,
+            "card_type": card_type,
+            "title": (
+                f"{subject_name}: coverage gap"
+                if card_type == "coverage_gap"
+                else f"{subject_name}: intelligence pattern"
+            ),
+            "summary": summary or "A refreshed intelligence snapshot produced a feed signal.",
+            "source": subject_name if kind == "source" else None,
+            "url": subject.get("website_url") if kind == "source" else None,
+            "topic": topic_label,
+            "priority": priority,
+            "priority_score": priority,
+            "personalized_score": priority,
+            "narrative_signal": "Contextual intelligence aggregation, not a truth verdict.",
+            "framing": dominant_frame,
+            "payload": {
+                **_card_base_payload(payload, run_id),
+                "signal_reason": "snapshot_refresh",
+                "snapshot_created_at": snapshot.get("created_at"),
+            },
+            "recommendations": [
+                {
+                    "type": "open_intelligence_subject",
+                    "label": "Open intelligence view",
+                    "href": href,
+                    "reason": "Inspect the source/topic pattern, sample, and limitations.",
+                },
+                {
+                    "type": "open_feed",
+                    "label": "Review feed",
+                    "href": "/",
+                    "reason": "Place this signal alongside recent article and comparison cards.",
+                },
+            ],
+            "explanation": {
+                "why_this_matters": "A source/topic aggregation changed enough to be surfaced in the main intelligence feed.",
+                "what_changed": {
+                    "article_count": article_count,
+                    "dominant_frame": dominant_frame,
+                    "recurring_claim_count": len(recurring_claims),
+                    "weak_spots": weak_spots[:4],
+                },
+                "recommended_action": "Open the intelligence view, then compare supporting articles before drawing conclusions.",
+            },
+            "analysis": {
+                "intelligence": payload,
+                "provider_metadata": payload.get("provider_metadata") or {},
+            },
+        }
+    ]
+
+    if recurring_claims:
+        claim_summary = recurring_claims[0]
+        cards.append(
+            {
+                "id": str(uuid4()),
+                "session_id": session_id,
+                "topic_id": topic_id,
+                "source_id": source_id,
+                "card_type": "recurring_claim",
+                "title": f"{subject_name}: recurring claim cluster",
+                "summary": intelligence_provider.clean_text(claim_summary, limit=900),
+                "source": subject_name if kind == "source" else None,
+                "url": subject.get("website_url") if kind == "source" else None,
+                "topic": topic_label,
+                "priority": max(priority, 0.7),
+                "priority_score": max(priority, 0.7),
+                "personalized_score": max(priority, 0.7),
+                "narrative_signal": "Repeated claims are comparison leads, not truth judgments.",
+                "framing": dominant_frame,
+                "payload": {
+                    **_card_base_payload(payload, run_id),
+                    "signal_reason": "recurring_claim",
+                    "primary_claim": claim_summary,
+                    "snapshot_created_at": snapshot.get("created_at"),
+                },
+                "recommendations": [
+                    {
+                        "type": "open_intelligence_subject",
+                        "label": "Open intelligence view",
+                        "href": href,
+                        "reason": "Review which articles produced the recurring claim signal.",
+                    },
+                    {
+                        "type": "compare",
+                        "label": "Compare coverage",
+                        "href": "/compare",
+                        "reason": "Check whether other sources add, omit, or frame this claim differently.",
+                    },
+                ],
+                "explanation": {
+                    "why_this_matters": "The same or similar claim is recurring in the sampled source/topic coverage.",
+                    "what_changed": {
+                        "primary_claim": claim_summary,
+                        "recurring_claims": recurring_claims[:6],
+                        "article_count": article_count,
+                    },
+                    "recommended_action": "Use compare and OSINT context before treating repeated claims as evidence.",
+                },
+                "analysis": {
+                    "intelligence": payload,
+                    "provider_metadata": payload.get("provider_metadata") or {},
+                },
+            }
+        )
+
+    return cards
+
+
 async def build_source_intelligence(source_id: str, refresh: bool = False, limit: int = 100) -> dict:
     source = get_source_record(source_id)
     if not source:
@@ -724,14 +903,36 @@ async def refresh_intelligence_snapshots(
     source_limit: int = 50,
     topic_limit: int = 50,
     article_limit: int = 100,
+    create_cards: bool = True,
+    card_limit: int = 50,
 ) -> dict:
+    run_id = str(uuid4())
+    started = datetime.now(timezone.utc)
     source_results = []
     topic_results = []
     errors = []
+    generated_cards = []
+    saved_cards = []
+    card_limit = max(0, min(int(card_limit or 50), 100))
 
-    for source in list_source_records(limit=max(1, min(int(source_limit or 50), 250))):
+    source_count_limit = max(1, min(int(source_limit or 50), 250))
+    sources = sorted(
+        list_source_records(limit=250),
+        key=lambda item: int(item.get("article_count") or 0),
+        reverse=True,
+    )[:source_count_limit]
+    for source in sources:
         try:
             result = await build_source_intelligence(source["id"], refresh=True, limit=article_limit)
+            cards_for_snapshot = []
+            if create_cards and len(generated_cards) < card_limit:
+                cards_for_snapshot = _build_intelligence_feed_cards(
+                    kind="source",
+                    payload=result,
+                    session_id=session_id,
+                    run_id=run_id,
+                )[: max(0, card_limit - len(generated_cards))]
+                generated_cards.extend(cards_for_snapshot)
             source_results.append(
                 {
                     "source_id": source["id"],
@@ -739,6 +940,7 @@ async def refresh_intelligence_snapshots(
                     "status": result.get("status"),
                     "snapshot_id": (result.get("snapshot") or {}).get("id"),
                     "sample_size": (result.get("sample") or {}).get("article_count", 0),
+                    "card_count": len(cards_for_snapshot),
                 }
             )
         except FeedStoreError as exc:
@@ -752,6 +954,15 @@ async def refresh_intelligence_snapshots(
                 refresh=True,
                 limit=article_limit,
             )
+            cards_for_snapshot = []
+            if create_cards and len(generated_cards) < card_limit:
+                cards_for_snapshot = _build_intelligence_feed_cards(
+                    kind="topic",
+                    payload=result,
+                    session_id=session_id,
+                    run_id=run_id,
+                )[: max(0, card_limit - len(generated_cards))]
+                generated_cards.extend(cards_for_snapshot)
             topic_results.append(
                 {
                     "topic_id": topic["id"],
@@ -759,18 +970,77 @@ async def refresh_intelligence_snapshots(
                     "status": result.get("status"),
                     "snapshot_id": (result.get("snapshot") or {}).get("id"),
                     "sample_size": (result.get("sample") or {}).get("article_count", 0),
+                    "card_count": len(cards_for_snapshot),
                 }
             )
         except FeedStoreError as exc:
             errors.append({"snapshot_type": "topic", "subject_id": topic.get("id"), "error": str(exc)})
 
+    if generated_cards:
+        try:
+            saved_cards = save_generated_feed_cards(generated_cards)
+        except FeedStoreError as exc:
+            errors.append({"snapshot_type": "feed_cards", "subject_id": None, "error": str(exc)})
+
     completed = len(source_results) + len(topic_results)
-    return {
-        "status": "completed" if not errors else "partial" if completed else "failed",
+    status = "completed" if not errors else "partial" if completed else "failed"
+    finished = datetime.now(timezone.utc)
+    summary = {
         "source_count": len(source_results),
         "topic_count": len(topic_results),
+        "snapshot_count": completed,
+        "card_count": len(saved_cards),
+        "error_count": len(errors),
+        "create_cards": create_cards,
+    }
+    run = save_intelligence_refresh_run(
+        run_id=run_id,
+        session_id=session_id,
+        status=status,
+        started_at=started.isoformat(),
+        finished_at=finished.isoformat(),
+        duration_ms=round((finished - started).total_seconds() * 1000),
+        source_count=len(source_results),
+        topic_count=len(topic_results),
+        snapshot_count=completed,
+        card_count=len(saved_cards),
+        error_count=len(errors),
+        limits={
+            "source_limit": source_limit,
+            "topic_limit": topic_limit,
+            "article_limit": article_limit,
+            "card_limit": card_limit,
+        },
+        errors=errors,
+        summary=summary,
+    )
+    return {
+        "status": "completed" if not errors else "partial" if completed else "failed",
+        "run": run,
+        "source_count": len(source_results),
+        "topic_count": len(topic_results),
+        "snapshot_count": completed,
+        "card_count": len(saved_cards),
         "error_count": len(errors),
         "sources": source_results,
         "topics": topic_results,
+        "cards": saved_cards,
         "errors": errors,
+    }
+
+
+def list_recent_intelligence_refresh_runs(
+    *,
+    session_id: str | None = None,
+    limit: int = 25,
+) -> dict:
+    runs = list_intelligence_refresh_runs(session_id=session_id, limit=limit)
+    return {
+        "runs": runs,
+        "summary": {
+            "run_count": len(runs),
+            "latest_status": runs[0]["status"] if runs else None,
+            "latest_started_at": runs[0]["started_at"] if runs else None,
+            "latest_card_count": runs[0]["card_count"] if runs else 0,
+        },
     }

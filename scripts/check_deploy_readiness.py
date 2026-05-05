@@ -16,7 +16,7 @@ SCHEDULER_COMMAND = (
 )
 INTELLIGENCE_SCHEDULER_COMMAND = (
     "python scripts/refresh_intelligence_snapshots.py --source-limit 50 "
-    "--topic-limit 50 --article-limit 100"
+    "--topic-limit 50 --article-limit 100 --card-limit 50"
 )
 
 PRODUCTION_ENV_VARS = [
@@ -413,6 +413,7 @@ def build_report(strict: bool = False) -> dict[str, Any]:
             "follow_up_purpose": "Refresh source/topic intelligence snapshots after ingestion batches.",
             "follow_up_interval": "15-60 minutes after ingestion",
             "follow_up_command": INTELLIGENCE_SCHEDULER_COMMAND,
+            "follow_up_api_alternative": "POST /api/v1/intelligence/refresh with X-Parallax-Admin-Key",
             "admin_api_alternative": "POST /api/v1/sources/sync-active with X-Parallax-Admin-Key",
         },
         "required_env": PRODUCTION_ENV_VARS,
@@ -445,6 +446,7 @@ def print_text(report: dict[str, Any]) -> None:
     print(f"- Command: {report['scheduler']['command']}")
     print(f"- Follow-up interval: {report['scheduler']['follow_up_interval']}")
     print(f"- Follow-up command: {report['scheduler']['follow_up_command']}")
+    print(f"- Follow-up API alternative: {report['scheduler']['follow_up_api_alternative']}")
     print(f"- API alternative: {report['scheduler']['admin_api_alternative']}")
 
     print("\nProduction env:")

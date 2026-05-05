@@ -22,6 +22,8 @@ def main() -> int:
     parser.add_argument("--source-limit", type=int, default=50, help="Maximum sources to refresh.")
     parser.add_argument("--topic-limit", type=int, default=50, help="Maximum topics to refresh.")
     parser.add_argument("--article-limit", type=int, default=100, help="Maximum articles per subject sample.")
+    parser.add_argument("--card-limit", type=int, default=50, help="Maximum intelligence feed cards to create.")
+    parser.add_argument("--no-cards", action="store_true", help="Refresh snapshots without creating feed cards.")
     args = parser.parse_args()
 
     result = asyncio.run(
@@ -30,6 +32,8 @@ def main() -> int:
             source_limit=args.source_limit,
             topic_limit=args.topic_limit,
             article_limit=args.article_limit,
+            create_cards=not args.no_cards,
+            card_limit=args.card_limit,
         )
     )
     print(
@@ -38,7 +42,10 @@ def main() -> int:
                 "status": result["status"],
                 "source_count": result["source_count"],
                 "topic_count": result["topic_count"],
+                "snapshot_count": result["snapshot_count"],
+                "card_count": result["card_count"],
                 "error_count": result["error_count"],
+                "run_id": result.get("run", {}).get("id"),
                 "errors": result["errors"],
             },
             indent=2,

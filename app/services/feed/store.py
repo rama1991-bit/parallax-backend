@@ -39,6 +39,7 @@ SOURCE_SYNC_RUNS = []
 SOURCE_OPS_ALERTS = []
 SOURCE_OPS_ALERT_DELIVERIES = []
 INTELLIGENCE_SNAPSHOTS = []
+INTELLIGENCE_REFRESH_RUNS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -53,6 +54,10 @@ _ALERT_CARD_TYPES = (
     "topic_monitor",
     "feed_item",
     "ingested_article",
+    "source_pattern",
+    "topic_shift",
+    "recurring_claim",
+    "coverage_gap",
 )
 _SOURCE_SIZES = {"major", "medium", "small", "niche"}
 _SOURCE_TYPES = {
@@ -452,6 +457,24 @@ def _ensure_schema():
                         sample_size integer not null default 0,
                         created_at timestamptz not null default now()
                     );
+
+                    create table if not exists public.intelligence_refresh_runs (
+                        id uuid primary key,
+                        session_id text,
+                        status text not null default 'completed' check (status in ('completed', 'partial', 'failed')),
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        source_count integer not null default 0,
+                        topic_count integer not null default 0,
+                        snapshot_count integer not null default 0,
+                        card_count integer not null default 0,
+                        error_count integer not null default 0,
+                        limits jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
                     """
                 )
 
@@ -748,6 +771,33 @@ def _ensure_schema():
                     """
                     create index if not exists idx_intelligence_snapshots_created
                     on public.intelligence_snapshots (created_at desc);
+                    """,
+                    """
+                    create table if not exists public.intelligence_refresh_runs (
+                        id uuid primary key,
+                        session_id text,
+                        status text not null default 'completed' check (status in ('completed', 'partial', 'failed')),
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        source_count integer not null default 0,
+                        topic_count integer not null default 0,
+                        snapshot_count integer not null default 0,
+                        card_count integer not null default 0,
+                        error_count integer not null default 0,
+                        limits jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create index if not exists idx_intelligence_refresh_runs_started
+                    on public.intelligence_refresh_runs (started_at desc);
+                    """,
+                    """
+                    create index if not exists idx_intelligence_refresh_runs_session_started
+                    on public.intelligence_refresh_runs (session_id, started_at desc);
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -3467,6 +3517,257 @@ def get_latest_intelligence_snapshot(snapshot_type: str, subject_id: str) -> dic
     return snapshots[0] if snapshots else None
 
 
+def _normalize_refresh_run_status(value: str | None) -> str:
+    clean = _clean_text(value, 20) or "completed"
+    return clean if clean in {"completed", "partial", "failed"} else "completed"
+
+
+def _row_to_intelligence_refresh_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "status": row.get("status") or "completed",
+        "started_at": _row_optional_datetime(row, "started_at"),
+        "finished_at": _row_optional_datetime(row, "finished_at"),
+        "duration_ms": int(row.get("duration_ms") or 0),
+        "source_count": int(row.get("source_count") or 0),
+        "topic_count": int(row.get("topic_count") or 0),
+        "snapshot_count": int(row.get("snapshot_count") or 0),
+        "card_count": int(row.get("card_count") or 0),
+        "error_count": int(row.get("error_count") or 0),
+        "limits": row.get("limits") or {},
+        "errors": row.get("errors") or [],
+        "summary": row.get("summary") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_intelligence_refresh_run(
+    *,
+    run_id: str | None = None,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    status: str = "completed",
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    duration_ms: int = 0,
+    source_count: int = 0,
+    topic_count: int = 0,
+    snapshot_count: int = 0,
+    card_count: int = 0,
+    error_count: int = 0,
+    limits: dict | None = None,
+    errors: list | None = None,
+    summary: dict | None = None,
+) -> dict:
+    run = {
+        "id": run_id or str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "status": _normalize_refresh_run_status(status),
+        "started_at": started_at or now_iso(),
+        "finished_at": finished_at or now_iso(),
+        "duration_ms": max(0, int(duration_ms or 0)),
+        "source_count": max(0, int(source_count or 0)),
+        "topic_count": max(0, int(topic_count or 0)),
+        "snapshot_count": max(0, int(snapshot_count or 0)),
+        "card_count": max(0, int(card_count or 0)),
+        "error_count": max(0, int(error_count or 0)),
+        "limits": limits or {},
+        "errors": errors or [],
+        "summary": summary or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        INTELLIGENCE_REFRESH_RUNS.insert(0, run)
+        return run
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.intelligence_refresh_runs (
+                        id, session_id, status, started_at, finished_at, duration_ms,
+                        source_count, topic_count, snapshot_count, card_count, error_count,
+                        limits, errors, summary, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["status"],
+                        run["started_at"],
+                        run["finished_at"],
+                        run["duration_ms"],
+                        run["source_count"],
+                        run["topic_count"],
+                        run["snapshot_count"],
+                        run["card_count"],
+                        run["error_count"],
+                        Json(run["limits"]),
+                        Json(run["errors"]),
+                        Json(run["summary"]),
+                    ),
+                )
+                return _row_to_intelligence_refresh_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save intelligence refresh run: {exc}") from exc
+
+
+def list_intelligence_refresh_runs(
+    *,
+    session_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+
+    if not database_enabled():
+        runs = [
+            run
+            for run in INTELLIGENCE_REFRESH_RUNS
+            if not clean_session_id or (run.get("session_id") or ANONYMOUS_SESSION_ID) == clean_session_id
+        ]
+        return sorted(runs, key=lambda item: item.get("started_at") or item.get("created_at") or "", reverse=True)[
+            :limit
+        ]
+
+    _ensure_schema()
+    where_sql = "where coalesce(session_id, %s) = %s" if clean_session_id else ""
+    params: tuple[object, ...] = (
+        (ANONYMOUS_SESSION_ID, clean_session_id, limit) if clean_session_id else (limit,)
+    )
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.intelligence_refresh_runs
+                    {where_sql}
+                    order by started_at desc
+                    limit %s;
+                    """,
+                    params,
+                )
+                return [_row_to_intelligence_refresh_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list intelligence refresh runs: {exc}") from exc
+
+
+def _normalize_generated_feed_card(card: dict) -> dict:
+    priority = _as_float(card.get("priority_score"), _as_float(card.get("priority"), 0.5))
+    return {
+        "id": card.get("id") or str(uuid4()),
+        "session_id": card.get("session_id") or ANONYMOUS_SESSION_ID,
+        "topic_id": card.get("topic_id"),
+        "article_id": card.get("article_id"),
+        "alert_id": card.get("alert_id"),
+        "report_id": card.get("report_id"),
+        "source_id": card.get("source_id"),
+        "source_feed_id": card.get("source_feed_id"),
+        "ingested_article_id": card.get("ingested_article_id"),
+        "node_id": card.get("node_id"),
+        "comparison_id": card.get("comparison_id"),
+        "title": _clean_text(card.get("title"), 300, "Intelligence signal"),
+        "summary": _clean_text(card.get("summary"), 2000, ""),
+        "source": _clean_text(card.get("source"), 200),
+        "url": _clean_url(card.get("url")),
+        "topic": _clean_text(card.get("topic"), 200),
+        "card_type": _clean_text(card.get("card_type"), 60, "source_pattern"),
+        "priority": priority,
+        "priority_score": priority,
+        "personalized_score": _as_float(card.get("personalized_score"), priority),
+        "narrative_signal": _clean_text(card.get("narrative_signal"), 500),
+        "evidence_score": card.get("evidence_score"),
+        "framing": _clean_text(card.get("framing"), 200),
+        "payload": card.get("payload") or {},
+        "recommendations": card.get("recommendations") or [],
+        "explanation": card.get("explanation") or {},
+        "analysis": card.get("analysis") or {},
+        "is_read": bool(card.get("is_read")),
+        "is_saved": bool(card.get("is_saved")),
+        "is_dismissed": bool(card.get("is_dismissed")),
+        "created_at": card.get("created_at") or now_iso(),
+    }
+
+
+def save_generated_feed_cards(cards: list[dict]) -> list[dict]:
+    normalized = [_normalize_generated_feed_card(card) for card in cards if card]
+    if not normalized:
+        return []
+
+    if not database_enabled():
+        for card in reversed(normalized):
+            FEED_CARDS.insert(0, card)
+        return normalized
+
+    _ensure_schema()
+    saved: list[dict] = []
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for card in normalized:
+                    cur.execute(
+                        f"""
+                        insert into public.feed_cards (
+                            id, session_id, topic_id, article_id, alert_id, report_id,
+                            source_id, source_feed_id, ingested_article_id, node_id, comparison_id,
+                            title, summary, source, url, topic, card_type, priority,
+                            priority_score, personalized_score, narrative_signal, evidence_score,
+                            framing, payload, recommendations, explanation, analysis, is_read,
+                            is_saved, is_dismissed, created_at, updated_at
+                        )
+                        values (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, now()
+                        )
+                        returning {_card_columns()};
+                        """,
+                        (
+                            card["id"],
+                            card["session_id"],
+                            card["topic_id"],
+                            card["article_id"],
+                            card["alert_id"],
+                            card["report_id"],
+                            card["source_id"],
+                            card["source_feed_id"],
+                            card["ingested_article_id"],
+                            card["node_id"],
+                            card["comparison_id"],
+                            card["title"],
+                            card["summary"],
+                            card["source"],
+                            card["url"],
+                            card["topic"],
+                            card["card_type"],
+                            card["priority"],
+                            card["priority_score"],
+                            card["personalized_score"],
+                            card["narrative_signal"],
+                            card["evidence_score"],
+                            card["framing"],
+                            Json(card["payload"]),
+                            Json(card["recommendations"]),
+                            Json(card["explanation"]),
+                            Json(card["analysis"]),
+                            card["is_read"],
+                            card["is_saved"],
+                            card["is_dismissed"],
+                            card["created_at"],
+                        ),
+                    )
+                    saved.append(_row_to_card(cur.fetchone()))
+        return saved
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save generated feed cards: {exc}") from exc
+
+
 def _source_ops_alert_payload(
     source: dict,
     health: dict,
@@ -5972,6 +6273,10 @@ def _filtered_in_memory(filter_type: str, session_id: str) -> list[dict]:
                 "coverage_change",
                 "source_ecosystem_change",
                 "divergence_increase",
+                "source_pattern",
+                "topic_shift",
+                "recurring_claim",
+                "coverage_gap",
             }
         ]
     if filter_type == "articles":
@@ -6004,7 +6309,8 @@ def list_feed_cards(
     elif filter_type == "narrative":
         where.append(
             "card_type in ('narrative_frame_shift', 'coverage_change', "
-            "'source_ecosystem_change', 'divergence_increase')"
+            "'source_ecosystem_change', 'divergence_increase', "
+            "'source_pattern', 'topic_shift', 'recurring_claim', 'coverage_gap')"
         )
     elif filter_type == "articles":
         where.append("card_type in ('article_insight', 'ingested_article')")
@@ -6060,6 +6366,8 @@ def _alert_kind(card: dict) -> str:
         return "feed"
     if card_type == "ingested_article":
         return "source"
+    if card_type in {"source_pattern", "topic_shift", "recurring_claim", "coverage_gap"}:
+        return "intelligence"
     if card_type == "article_insight":
         return "analysis"
     if card_type in {

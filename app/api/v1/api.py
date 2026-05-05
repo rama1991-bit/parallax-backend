@@ -15,6 +15,7 @@ from app.api.v1.routes import (
     saved_reports,
     compare,
     sources,
+    intelligence,
 )
 
 api_router = APIRouter()
@@ -33,3 +34,4 @@ api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(briefs.router, prefix="/public", tags=["public"])
 api_router.include_router(authors.router, prefix="/authors", tags=["authors"])
 api_router.include_router(sources.router, prefix="/sources", tags=["sources"])
+api_router.include_router(intelligence.router, prefix="/intelligence", tags=["intelligence"])

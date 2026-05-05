@@ -50,6 +50,7 @@ def _reset_memory_store() -> None:
         store.SOURCE_OPS_ALERTS,
         store.SOURCE_OPS_ALERT_DELIVERIES,
         store.INTELLIGENCE_SNAPSHOTS,
+        store.INTELLIGENCE_REFRESH_RUNS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -534,6 +535,33 @@ def main() -> int:
         headers=headers,
     )
     assert denied_topic_intelligence_refresh.status_code == 403, denied_topic_intelligence_refresh.text
+    denied_intelligence_refresh = client.post("/api/v1/intelligence/refresh", headers=headers)
+    assert denied_intelligence_refresh.status_code == 403, denied_intelligence_refresh.text
+    batch_intelligence = _assert_ok(
+        client.post(
+            "/api/v1/intelligence/refresh?source_limit=2&topic_limit=2&article_limit=20&card_limit=6",
+            headers=admin_headers,
+        ),
+        "intelligence/refresh",
+    ).json()
+    assert batch_intelligence["run"]["id"], batch_intelligence
+    assert batch_intelligence["snapshot_count"] >= 2, batch_intelligence
+    assert batch_intelligence["card_count"] >= 2, batch_intelligence
+    assert store.INTELLIGENCE_REFRESH_RUNS, batch_intelligence
+    intelligence_runs = _assert_ok(
+        client.get("/api/v1/intelligence/runs", headers=admin_headers),
+        "intelligence/runs",
+    ).json()
+    assert intelligence_runs["runs"][0]["id"] == batch_intelligence["run"]["id"], intelligence_runs
+    denied_intelligence_runs = client.get("/api/v1/intelligence/runs", headers=headers)
+    assert denied_intelligence_runs.status_code == 403, denied_intelligence_runs.text
+    intelligence_feed = _assert_ok(
+        client.get("/api/v1/feed?filter_type=narrative&limit=20", headers=headers),
+        "feed/intelligence-cards",
+    ).json()
+    intelligence_card_types = {item["card_type"] for item in intelligence_feed["cards"]}
+    assert {"source_pattern", "topic_shift"} & intelligence_card_types, intelligence_feed
+    assert "recurring_claim" in intelligence_card_types, intelligence_feed
 
     article = ExtractedArticle(
         url="https://example.com/analysis",
