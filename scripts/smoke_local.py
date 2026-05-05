@@ -540,6 +540,8 @@ def main() -> int:
     assert denied_topic_intelligence_refresh.status_code == 403, denied_topic_intelligence_refresh.text
     denied_intelligence_refresh = client.post("/api/v1/intelligence/refresh", headers=headers)
     assert denied_intelligence_refresh.status_code == 403, denied_intelligence_refresh.text
+    denied_pipeline = client.post("/api/v1/intelligence/pipeline/run", headers=headers)
+    assert denied_pipeline.status_code == 403, denied_pipeline.text
     batch_intelligence = _assert_ok(
         client.post(
             "/api/v1/intelligence/refresh?source_limit=2&topic_limit=2&article_limit=20&card_limit=6",
@@ -614,6 +616,44 @@ def main() -> int:
     ).json()
     cluster_card_types = {item["card_type"] for item in cluster_feed["cards"]}
     assert {"event_cluster", "cross_language_cluster", "source_divergence", "missing_coverage"} & cluster_card_types, cluster_feed
+
+    original_pipeline_parse_rss_feed = source_sync_service.parse_rss_feed
+
+    async def fake_pipeline_parse_rss_feed(url: str, limit: int = 20):
+        return {
+            "url": url,
+            "title": "Pipeline Fixture RSS",
+            "description": "Fixture feed for pipeline automation.",
+            "items": [
+                {
+                    "external_id": f"pipeline-item-{abs(hash(url))}",
+                    "title": "Pipeline detects grid resilience follow-up",
+                    "summary": "Pipeline automation ingests a related grid resilience follow-up item.",
+                    "url": f"{url.rstrip('/')}/pipeline-grid-resilience-follow-up",
+                    "published_at": "2026-05-02T12:30:00+00:00",
+                    "raw": {"fixture": True, "pipeline": True},
+                }
+            ],
+        }
+
+    try:
+        source_sync_service.parse_rss_feed = fake_pipeline_parse_rss_feed
+        pipeline = _assert_ok(
+            client.post(
+                "/api/v1/intelligence/pipeline/run?source_limit=2&feed_limit=2&sync_article_limit=1&sync_card_limit=2&intelligence_source_limit=2&topic_limit=2&intelligence_article_limit=20&intelligence_card_limit=4&cluster_article_limit=50&cluster_limit=20&cluster_card_limit=6",
+                headers=admin_headers,
+            ),
+            "intelligence/pipeline-run",
+        ).json()
+    finally:
+        source_sync_service.parse_rss_feed = original_pipeline_parse_rss_feed
+
+    assert pipeline["pipeline_id"], pipeline
+    assert pipeline["status"] in {"completed", "partial"}, pipeline
+    phase_names = {phase["name"] for phase in pipeline["phases"]}
+    assert {"source_sync", "intelligence_refresh", "event_clusters"} <= phase_names, pipeline
+    assert pipeline["summary"]["feed_card_count"] >= 1, pipeline
+    assert pipeline["summary"]["cluster_count"] >= 1, pipeline
 
     article = ExtractedArticle(
         url="https://example.com/analysis",

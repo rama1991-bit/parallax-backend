@@ -22,6 +22,12 @@ EVENT_CLUSTER_SCHEDULER_COMMAND = (
     "python scripts/refresh_event_clusters.py --article-limit 250 "
     "--cluster-limit 100 --card-limit 50"
 )
+PIPELINE_SCHEDULER_COMMAND = (
+    "python scripts/run_intelligence_pipeline.py --source-limit 50 --feed-limit 100 "
+    "--sync-article-limit 10 --sync-card-limit 25 --intelligence-source-limit 50 "
+    "--topic-limit 50 --intelligence-article-limit 100 --intelligence-card-limit 50 "
+    "--cluster-article-limit 250 --cluster-limit 100 --cluster-card-limit 50"
+)
 
 PRODUCTION_ENV_VARS = [
     "ENV=production",
@@ -414,6 +420,10 @@ def build_report(strict: bool = False) -> dict[str, Any]:
             "purpose": "Run active RSS source ingestion on a recurring worker or platform scheduler.",
             "recommended_interval": "15 minutes",
             "command": SCHEDULER_COMMAND,
+            "pipeline_purpose": "Run ingestion, source/topic snapshots, and event clusters in one scheduler job.",
+            "pipeline_interval": "15-60 minutes, depending on feed volume",
+            "pipeline_command": PIPELINE_SCHEDULER_COMMAND,
+            "pipeline_api_alternative": "POST /api/v1/intelligence/pipeline/run with X-Parallax-Admin-Key",
             "follow_up_purpose": "Refresh source/topic intelligence snapshots after ingestion batches.",
             "follow_up_interval": "15-60 minutes after ingestion",
             "follow_up_command": INTELLIGENCE_SCHEDULER_COMMAND,
@@ -452,6 +462,9 @@ def print_text(report: dict[str, Any]) -> None:
     print("\nScheduler:")
     print(f"- Interval: {report['scheduler']['recommended_interval']}")
     print(f"- Command: {report['scheduler']['command']}")
+    print(f"- Pipeline interval: {report['scheduler']['pipeline_interval']}")
+    print(f"- Pipeline command: {report['scheduler']['pipeline_command']}")
+    print(f"- Pipeline API alternative: {report['scheduler']['pipeline_api_alternative']}")
     print(f"- Follow-up interval: {report['scheduler']['follow_up_interval']}")
     print(f"- Follow-up command: {report['scheduler']['follow_up_command']}")
     print(f"- Follow-up API alternative: {report['scheduler']['follow_up_api_alternative']}")
