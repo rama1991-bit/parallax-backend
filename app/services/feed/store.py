@@ -40,6 +40,9 @@ SOURCE_OPS_ALERTS = []
 SOURCE_OPS_ALERT_DELIVERIES = []
 INTELLIGENCE_SNAPSHOTS = []
 INTELLIGENCE_REFRESH_RUNS = []
+EVENT_CLUSTERS = []
+EVENT_CLUSTER_ARTICLES = []
+EVENT_CLUSTER_REFRESH_RUNS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -58,6 +61,10 @@ _ALERT_CARD_TYPES = (
     "topic_shift",
     "recurring_claim",
     "coverage_gap",
+    "event_cluster",
+    "cross_language_cluster",
+    "source_divergence",
+    "missing_coverage",
 )
 _SOURCE_SIZES = {"major", "medium", "small", "niche"}
 _SOURCE_TYPES = {
@@ -798,6 +805,85 @@ def _ensure_schema():
                     """
                     create index if not exists idx_intelligence_refresh_runs_session_started
                     on public.intelligence_refresh_runs (session_id, started_at desc);
+                    """,
+                    """
+                    create table if not exists public.event_clusters (
+                        id uuid primary key,
+                        cluster_key text not null unique,
+                        title text not null,
+                        summary text,
+                        status text not null default 'active' check (status in ('active', 'archived')),
+                        primary_topic text,
+                        languages jsonb not null default '[]'::jsonb,
+                        countries jsonb not null default '[]'::jsonb,
+                        source_ids jsonb not null default '[]'::jsonb,
+                        article_count integer not null default 0,
+                        analyzed_count integer not null default 0,
+                        first_seen_at timestamptz,
+                        latest_seen_at timestamptz,
+                        fingerprint_terms jsonb not null default '[]'::jsonb,
+                        claims jsonb not null default '[]'::jsonb,
+                        frames jsonb not null default '[]'::jsonb,
+                        provider_metadata jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        updated_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create table if not exists public.event_cluster_articles (
+                        id uuid primary key,
+                        cluster_id uuid not null references public.event_clusters(id) on delete cascade,
+                        article_id uuid not null references public.ingested_articles(id) on delete cascade,
+                        similarity_score double precision not null default 0,
+                        matched_terms jsonb not null default '[]'::jsonb,
+                        language text,
+                        country text,
+                        source_id uuid references public.sources(id) on delete set null,
+                        created_at timestamptz not null default now(),
+                        unique (cluster_id, article_id)
+                    );
+                    """,
+                    """
+                    create table if not exists public.event_cluster_refresh_runs (
+                        id uuid primary key,
+                        session_id text,
+                        status text not null default 'completed' check (status in ('completed', 'partial', 'failed')),
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        cluster_count integer not null default 0,
+                        article_count integer not null default 0,
+                        card_count integer not null default 0,
+                        error_count integer not null default 0,
+                        limits jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create index if not exists idx_event_clusters_latest
+                    on public.event_clusters (latest_seen_at desc, article_count desc);
+                    """,
+                    """
+                    create index if not exists idx_event_clusters_primary_topic
+                    on public.event_clusters (primary_topic);
+                    """,
+                    """
+                    create index if not exists idx_event_cluster_articles_cluster
+                    on public.event_cluster_articles (cluster_id, similarity_score desc);
+                    """,
+                    """
+                    create index if not exists idx_event_cluster_articles_article
+                    on public.event_cluster_articles (article_id);
+                    """,
+                    """
+                    create index if not exists idx_event_cluster_refresh_runs_started
+                    on public.event_cluster_refresh_runs (started_at desc);
+                    """,
+                    """
+                    create index if not exists idx_event_cluster_refresh_runs_session_started
+                    on public.event_cluster_refresh_runs (session_id, started_at desc);
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -3658,6 +3744,452 @@ def list_intelligence_refresh_runs(
         raise FeedStoreError(f"Could not list intelligence refresh runs: {exc}") from exc
 
 
+def _row_to_event_cluster(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "cluster_key": row.get("cluster_key"),
+        "title": row.get("title") or "Untitled event cluster",
+        "summary": row.get("summary") or "",
+        "status": row.get("status") or "active",
+        "primary_topic": row.get("primary_topic"),
+        "languages": row.get("languages") or [],
+        "countries": row.get("countries") or [],
+        "source_ids": row.get("source_ids") or [],
+        "article_count": int(row.get("article_count") or 0),
+        "analyzed_count": int(row.get("analyzed_count") or 0),
+        "first_seen_at": _row_optional_datetime(row, "first_seen_at"),
+        "latest_seen_at": _row_optional_datetime(row, "latest_seen_at"),
+        "fingerprint_terms": row.get("fingerprint_terms") or [],
+        "claims": row.get("claims") or [],
+        "frames": row.get("frames") or [],
+        "provider_metadata": row.get("provider_metadata") or {},
+        "created_at": _row_created_at(row),
+        "updated_at": _row_optional_datetime(row, "updated_at") or _row_created_at(row),
+    }
+
+
+def _row_to_event_cluster_article(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "cluster_id": str(row.get("cluster_id")) if row.get("cluster_id") else None,
+        "article_id": str(row.get("article_id")) if row.get("article_id") else None,
+        "similarity_score": _as_float(row.get("similarity_score"), 0.0),
+        "matched_terms": row.get("matched_terms") or [],
+        "language": row.get("language"),
+        "country": row.get("country"),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "created_at": _row_created_at(row),
+    }
+
+
+def replace_event_clusters(clusters: list[dict], memberships: list[dict]) -> dict:
+    normalized_clusters = []
+    cluster_ids = set()
+    for cluster in clusters:
+        cluster_id = cluster.get("id") or str(uuid4())
+        if cluster_id in cluster_ids:
+            continue
+        cluster_ids.add(cluster_id)
+        normalized_clusters.append(
+            {
+                "id": cluster_id,
+                "cluster_key": _clean_text(cluster.get("cluster_key"), 160, cluster_id),
+                "title": _clean_text(cluster.get("title"), 300, "Untitled event cluster"),
+                "summary": _clean_text(cluster.get("summary"), 2000, ""),
+                "status": "archived" if cluster.get("status") == "archived" else "active",
+                "primary_topic": _clean_text(cluster.get("primary_topic"), 180),
+                "languages": cluster.get("languages") or [],
+                "countries": cluster.get("countries") or [],
+                "source_ids": cluster.get("source_ids") or [],
+                "article_count": max(0, int(cluster.get("article_count") or 0)),
+                "analyzed_count": max(0, int(cluster.get("analyzed_count") or 0)),
+                "first_seen_at": cluster.get("first_seen_at"),
+                "latest_seen_at": cluster.get("latest_seen_at"),
+                "fingerprint_terms": cluster.get("fingerprint_terms") or [],
+                "claims": cluster.get("claims") or [],
+                "frames": cluster.get("frames") or [],
+                "provider_metadata": cluster.get("provider_metadata") or {},
+                "created_at": cluster.get("created_at") or now_iso(),
+                "updated_at": cluster.get("updated_at") or now_iso(),
+            }
+        )
+
+    normalized_memberships = []
+    seen_pairs = set()
+    for membership in memberships:
+        cluster_id = membership.get("cluster_id")
+        article_id = membership.get("article_id")
+        if not cluster_id or not article_id or cluster_id not in cluster_ids:
+            continue
+        pair = (cluster_id, article_id)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        normalized_memberships.append(
+            {
+                "id": membership.get("id") or str(uuid4()),
+                "cluster_id": cluster_id,
+                "article_id": article_id,
+                "similarity_score": max(0.0, min(_as_float(membership.get("similarity_score"), 0.0), 1.0)),
+                "matched_terms": membership.get("matched_terms") or [],
+                "language": _clean_text(membership.get("language"), 80),
+                "country": _clean_text(membership.get("country"), 80),
+                "source_id": membership.get("source_id"),
+                "created_at": membership.get("created_at") or now_iso(),
+            }
+        )
+
+    if not database_enabled():
+        EVENT_CLUSTERS.clear()
+        EVENT_CLUSTERS.extend(normalized_clusters)
+        EVENT_CLUSTER_ARTICLES.clear()
+        EVENT_CLUSTER_ARTICLES.extend(normalized_memberships)
+        return {"clusters": normalized_clusters, "memberships": normalized_memberships}
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("delete from public.event_cluster_articles;")
+                cur.execute("delete from public.event_clusters;")
+                saved_clusters = []
+                for cluster in normalized_clusters:
+                    cur.execute(
+                        """
+                        insert into public.event_clusters (
+                            id, cluster_key, title, summary, status, primary_topic,
+                            languages, countries, source_ids, article_count, analyzed_count,
+                            first_seen_at, latest_seen_at, fingerprint_terms, claims, frames,
+                            provider_metadata, created_at, updated_at
+                        )
+                        values (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s
+                        )
+                        returning *;
+                        """,
+                        (
+                            cluster["id"],
+                            cluster["cluster_key"],
+                            cluster["title"],
+                            cluster["summary"],
+                            cluster["status"],
+                            cluster["primary_topic"],
+                            Json(cluster["languages"]),
+                            Json(cluster["countries"]),
+                            Json(cluster["source_ids"]),
+                            cluster["article_count"],
+                            cluster["analyzed_count"],
+                            cluster["first_seen_at"],
+                            cluster["latest_seen_at"],
+                            Json(cluster["fingerprint_terms"]),
+                            Json(cluster["claims"]),
+                            Json(cluster["frames"]),
+                            Json(cluster["provider_metadata"]),
+                            cluster["created_at"],
+                            cluster["updated_at"],
+                        ),
+                    )
+                    saved_clusters.append(_row_to_event_cluster(cur.fetchone()))
+
+                saved_memberships = []
+                for membership in normalized_memberships:
+                    cur.execute(
+                        """
+                        insert into public.event_cluster_articles (
+                            id, cluster_id, article_id, similarity_score, matched_terms,
+                            language, country, source_id, created_at
+                        )
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        returning *;
+                        """,
+                        (
+                            membership["id"],
+                            membership["cluster_id"],
+                            membership["article_id"],
+                            membership["similarity_score"],
+                            Json(membership["matched_terms"]),
+                            membership["language"],
+                            membership["country"],
+                            membership["source_id"],
+                            membership["created_at"],
+                        ),
+                    )
+                    saved_memberships.append(_row_to_event_cluster_article(cur.fetchone()))
+                return {"clusters": saved_clusters, "memberships": saved_memberships}
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not replace event clusters: {exc}") from exc
+
+
+def list_event_clusters(limit: int = 25, status: str | None = "active") -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_status = _clean_text(status, 20)
+
+    if not database_enabled():
+        clusters = [
+            cluster
+            for cluster in EVENT_CLUSTERS
+            if not clean_status or cluster.get("status") == clean_status
+        ]
+        return sorted(
+            clusters,
+            key=lambda item: (
+                item.get("latest_seen_at") or item.get("created_at") or "",
+                int(item.get("article_count") or 0),
+            ),
+            reverse=True,
+        )[:limit]
+
+    _ensure_schema()
+    where_sql = "where status = %s" if clean_status else ""
+    params: tuple[object, ...] = (clean_status, limit) if clean_status else (limit,)
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.event_clusters
+                    {where_sql}
+                    order by latest_seen_at desc nulls last, article_count desc, created_at desc
+                    limit %s;
+                    """,
+                    params,
+                )
+                return [_row_to_event_cluster(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list event clusters: {exc}") from exc
+
+
+def get_event_cluster(cluster_id: str) -> dict | None:
+    if not database_enabled():
+        return next((cluster for cluster in EVENT_CLUSTERS if cluster.get("id") == cluster_id), None)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("select * from public.event_clusters where id::text = %s limit 1;", (cluster_id,))
+                row = cur.fetchone()
+                return _row_to_event_cluster(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load event cluster: {exc}") from exc
+
+
+def list_event_cluster_articles(cluster_id: str, limit: int = 25) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+
+    if not database_enabled():
+        memberships = [
+            membership
+            for membership in EVENT_CLUSTER_ARTICLES
+            if membership.get("cluster_id") == cluster_id
+        ]
+        memberships = sorted(memberships, key=lambda item: item.get("similarity_score", 0), reverse=True)[:limit]
+        enriched = []
+        for membership in memberships:
+            article = get_ingested_article_record(membership.get("article_id"))
+            enriched.append({**membership, "article": article})
+        return enriched
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select *
+                    from public.event_cluster_articles
+                    where cluster_id::text = %s
+                    order by similarity_score desc, created_at desc
+                    limit %s;
+                    """,
+                    (cluster_id, limit),
+                )
+                memberships = [_row_to_event_cluster_article(row) for row in cur.fetchall()]
+        return [
+            {**membership, "article": get_ingested_article_record(membership["article_id"])}
+            for membership in memberships
+        ]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list event cluster articles: {exc}") from exc
+
+
+def get_event_cluster_for_article(article_id: str) -> dict | None:
+    if not database_enabled():
+        membership = next(
+            (
+                item
+                for item in sorted(
+                    EVENT_CLUSTER_ARTICLES,
+                    key=lambda row: row.get("similarity_score", 0),
+                    reverse=True,
+                )
+                if item.get("article_id") == article_id
+            ),
+            None,
+        )
+        if not membership:
+            return None
+        cluster = get_event_cluster(membership.get("cluster_id"))
+        return {**cluster, "membership": membership} if cluster else None
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select eca.*
+                    from public.event_cluster_articles eca
+                    where eca.article_id::text = %s
+                    order by eca.similarity_score desc, eca.created_at desc
+                    limit 1;
+                    """,
+                    (article_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        membership = _row_to_event_cluster_article(row)
+        cluster = get_event_cluster(membership["cluster_id"])
+        return {**cluster, "membership": membership} if cluster else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load event cluster for article: {exc}") from exc
+
+
+def _row_to_event_cluster_refresh_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "status": row.get("status") or "completed",
+        "started_at": _row_optional_datetime(row, "started_at"),
+        "finished_at": _row_optional_datetime(row, "finished_at"),
+        "duration_ms": int(row.get("duration_ms") or 0),
+        "cluster_count": int(row.get("cluster_count") or 0),
+        "article_count": int(row.get("article_count") or 0),
+        "card_count": int(row.get("card_count") or 0),
+        "error_count": int(row.get("error_count") or 0),
+        "limits": row.get("limits") or {},
+        "errors": row.get("errors") or [],
+        "summary": row.get("summary") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_event_cluster_refresh_run(
+    *,
+    run_id: str | None = None,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    status: str = "completed",
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    duration_ms: int = 0,
+    cluster_count: int = 0,
+    article_count: int = 0,
+    card_count: int = 0,
+    error_count: int = 0,
+    limits: dict | None = None,
+    errors: list | None = None,
+    summary: dict | None = None,
+) -> dict:
+    run = {
+        "id": run_id or str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "status": _normalize_refresh_run_status(status),
+        "started_at": started_at or now_iso(),
+        "finished_at": finished_at or now_iso(),
+        "duration_ms": max(0, int(duration_ms or 0)),
+        "cluster_count": max(0, int(cluster_count or 0)),
+        "article_count": max(0, int(article_count or 0)),
+        "card_count": max(0, int(card_count or 0)),
+        "error_count": max(0, int(error_count or 0)),
+        "limits": limits or {},
+        "errors": errors or [],
+        "summary": summary or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        EVENT_CLUSTER_REFRESH_RUNS.insert(0, run)
+        return run
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.event_cluster_refresh_runs (
+                        id, session_id, status, started_at, finished_at, duration_ms,
+                        cluster_count, article_count, card_count, error_count,
+                        limits, errors, summary, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["status"],
+                        run["started_at"],
+                        run["finished_at"],
+                        run["duration_ms"],
+                        run["cluster_count"],
+                        run["article_count"],
+                        run["card_count"],
+                        run["error_count"],
+                        Json(run["limits"]),
+                        Json(run["errors"]),
+                        Json(run["summary"]),
+                    ),
+                )
+                return _row_to_event_cluster_refresh_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save event cluster refresh run: {exc}") from exc
+
+
+def list_event_cluster_refresh_runs(
+    *,
+    session_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+
+    if not database_enabled():
+        runs = [
+            run
+            for run in EVENT_CLUSTER_REFRESH_RUNS
+            if not clean_session_id or (run.get("session_id") or ANONYMOUS_SESSION_ID) == clean_session_id
+        ]
+        return sorted(runs, key=lambda item: item.get("started_at") or item.get("created_at") or "", reverse=True)[
+            :limit
+        ]
+
+    _ensure_schema()
+    where_sql = "where coalesce(session_id, %s) = %s" if clean_session_id else ""
+    params: tuple[object, ...] = (
+        (ANONYMOUS_SESSION_ID, clean_session_id, limit) if clean_session_id else (limit,)
+    )
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.event_cluster_refresh_runs
+                    {where_sql}
+                    order by started_at desc
+                    limit %s;
+                    """,
+                    params,
+                )
+                return [_row_to_event_cluster_refresh_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list event cluster refresh runs: {exc}") from exc
+
+
 def _normalize_generated_feed_card(card: dict) -> dict:
     priority = _as_float(card.get("priority_score"), _as_float(card.get("priority"), 0.5))
     return {
@@ -6277,6 +6809,10 @@ def _filtered_in_memory(filter_type: str, session_id: str) -> list[dict]:
                 "topic_shift",
                 "recurring_claim",
                 "coverage_gap",
+                "event_cluster",
+                "cross_language_cluster",
+                "source_divergence",
+                "missing_coverage",
             }
         ]
     if filter_type == "articles":
@@ -6310,7 +6846,8 @@ def list_feed_cards(
         where.append(
             "card_type in ('narrative_frame_shift', 'coverage_change', "
             "'source_ecosystem_change', 'divergence_increase', "
-            "'source_pattern', 'topic_shift', 'recurring_claim', 'coverage_gap')"
+            "'source_pattern', 'topic_shift', 'recurring_claim', 'coverage_gap', "
+            "'event_cluster', 'cross_language_cluster', 'source_divergence', 'missing_coverage')"
         )
     elif filter_type == "articles":
         where.append("card_type in ('article_insight', 'ingested_article')")
@@ -6366,7 +6903,16 @@ def _alert_kind(card: dict) -> str:
         return "feed"
     if card_type == "ingested_article":
         return "source"
-    if card_type in {"source_pattern", "topic_shift", "recurring_claim", "coverage_gap"}:
+    if card_type in {
+        "source_pattern",
+        "topic_shift",
+        "recurring_claim",
+        "coverage_gap",
+        "event_cluster",
+        "cross_language_cluster",
+        "source_divergence",
+        "missing_coverage",
+    }:
         return "intelligence"
     if card_type == "article_insight":
         return "analysis"

@@ -51,6 +51,9 @@ def _reset_memory_store() -> None:
         store.SOURCE_OPS_ALERT_DELIVERIES,
         store.INTELLIGENCE_SNAPSHOTS,
         store.INTELLIGENCE_REFRESH_RUNS,
+        store.EVENT_CLUSTERS,
+        store.EVENT_CLUSTER_ARTICLES,
+        store.EVENT_CLUSTER_REFRESH_RUNS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -562,6 +565,55 @@ def main() -> int:
     intelligence_card_types = {item["card_type"] for item in intelligence_feed["cards"]}
     assert {"source_pattern", "topic_shift"} & intelligence_card_types, intelligence_feed
     assert "recurring_claim" in intelligence_card_types, intelligence_feed
+
+    denied_cluster_refresh = client.post("/api/v1/intelligence/clusters/refresh", headers=headers)
+    assert denied_cluster_refresh.status_code == 403, denied_cluster_refresh.text
+    cluster_refresh = _assert_ok(
+        client.post(
+            "/api/v1/intelligence/clusters/refresh?article_limit=50&cluster_limit=20&card_limit=10",
+            headers=admin_headers,
+        ),
+        "intelligence/clusters-refresh",
+    ).json()
+    assert cluster_refresh["run"]["id"], cluster_refresh
+    assert cluster_refresh["cluster_count"] >= 1, cluster_refresh
+    assert cluster_refresh["article_count"] >= 2, cluster_refresh
+    assert cluster_refresh["card_count"] >= 1, cluster_refresh
+    assert store.EVENT_CLUSTERS and store.EVENT_CLUSTER_ARTICLES, cluster_refresh
+    cluster_runs = _assert_ok(
+        client.get("/api/v1/intelligence/clusters/runs", headers=admin_headers),
+        "intelligence/clusters-runs",
+    ).json()
+    assert cluster_runs["runs"][0]["id"] == cluster_refresh["run"]["id"], cluster_runs
+    denied_cluster_runs = client.get("/api/v1/intelligence/clusters/runs", headers=headers)
+    assert denied_cluster_runs.status_code == 403, denied_cluster_runs.text
+    clusters = _assert_ok(
+        client.get("/api/v1/intelligence/clusters?limit=10", headers=headers),
+        "intelligence/clusters",
+    ).json()
+    assert clusters["items"], clusters
+    topic_clusters = _assert_ok(
+        client.get(f"/api/v1/intelligence/clusters?topic_id={energy_topic['id']}&limit=10", headers=headers),
+        "intelligence/clusters-topic",
+    ).json()
+    assert topic_clusters["items"], topic_clusters
+    cluster_detail = _assert_ok(
+        client.get(f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}", headers=headers),
+        "intelligence/cluster-detail",
+    ).json()
+    assert cluster_detail["cluster"]["id"] == clusters["items"][0]["id"], cluster_detail
+    assert cluster_detail["articles"], cluster_detail
+    clustered_compare = _assert_ok(
+        client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
+        "compare/ingested-article-clustered",
+    ).json()
+    assert clustered_compare["event_cluster"]["id"], clustered_compare
+    cluster_feed = _assert_ok(
+        client.get("/api/v1/feed?filter_type=narrative&limit=30", headers=headers),
+        "feed/event-cluster-cards",
+    ).json()
+    cluster_card_types = {item["card_type"] for item in cluster_feed["cards"]}
+    assert {"event_cluster", "cross_language_cluster", "source_divergence", "missing_coverage"} & cluster_card_types, cluster_feed
 
     article = ExtractedArticle(
         url="https://example.com/analysis",

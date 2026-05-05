@@ -4,7 +4,9 @@ import re
 
 from app.services.feed.store import (
     FeedStoreError,
+    get_event_cluster_for_article,
     get_ingested_article_record,
+    list_event_cluster_articles,
     list_ingested_article_records,
     save_article_comparison_record,
 )
@@ -385,6 +387,33 @@ def _article_summary(article: dict, similarity: dict | None = None) -> dict:
     }
 
 
+def _cluster_summary(cluster: dict | None) -> dict | None:
+    if not cluster:
+        return None
+    return {
+        "id": cluster.get("id"),
+        "cluster_key": cluster.get("cluster_key"),
+        "title": cluster.get("title"),
+        "summary": cluster.get("summary"),
+        "primary_topic": cluster.get("primary_topic"),
+        "languages": cluster.get("languages") or [],
+        "countries": cluster.get("countries") or [],
+        "source_ids": cluster.get("source_ids") or [],
+        "article_count": cluster.get("article_count", 0),
+        "analyzed_count": cluster.get("analyzed_count", 0),
+        "first_seen_at": cluster.get("first_seen_at"),
+        "latest_seen_at": cluster.get("latest_seen_at"),
+        "fingerprint_terms": cluster.get("fingerprint_terms") or [],
+        "claims": cluster.get("claims") or [],
+        "frames": cluster.get("frames") or [],
+        "membership": cluster.get("membership") or {},
+        "limitations": [
+            "The event cluster is a retrieval signal, not evidence that the articles agree.",
+            "Cluster membership should be checked through claim, source, and timeline comparison.",
+        ],
+    }
+
+
 def _candidate_comparison(base: dict, candidate: dict, similarity: dict) -> dict:
     claim_overlap = _claim_overlap(_article_claims(base), _article_claims(candidate))
     base_frames = _article_frames(base)
@@ -462,9 +491,29 @@ def build_ingested_article_compare_result(article_id: str, limit: int = 8) -> di
     if not base:
         raise FeedStoreError("Ingested article not found.")
 
+    event_cluster = get_event_cluster_for_article(article_id)
     candidates = []
+    seen_candidate_ids = set()
+    if event_cluster:
+        for membership in list_event_cluster_articles(event_cluster["id"], limit=50):
+            candidate = membership.get("article")
+            if not candidate or candidate.get("id") == article_id:
+                continue
+            similarity = _similarity_score(base, candidate)
+            cluster_score = _as_float(membership.get("similarity_score"), 0.0)
+            similarity = {
+                **similarity,
+                "score": round(max(similarity["score"], min(cluster_score, 1.0)), 3),
+                "event_cluster_match": True,
+                "event_cluster_id": event_cluster["id"],
+                "cluster_similarity_score": round(cluster_score, 3),
+                "matched_terms": membership.get("matched_terms") or [],
+            }
+            candidates.append((similarity["score"] + 0.08, similarity, candidate))
+            seen_candidate_ids.add(candidate.get("id"))
+
     for candidate in list_ingested_article_records(limit=250):
-        if candidate.get("id") == article_id:
+        if candidate.get("id") == article_id or candidate.get("id") in seen_candidate_ids:
             continue
         similarity = _similarity_score(base, candidate)
         if similarity["score"] >= 0.12 or similarity["same_fingerprint"]:
@@ -520,6 +569,7 @@ def build_ingested_article_compare_result(article_id: str, limit: int = 8) -> di
         "id": str(uuid4()),
         "status": "completed",
         "base_article": _article_summary(base),
+        "event_cluster": _cluster_summary(event_cluster),
         "similar_articles": similar_articles,
         "comparison": {
             "shared_claims": shared_claims[:20],
