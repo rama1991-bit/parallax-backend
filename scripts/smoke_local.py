@@ -680,6 +680,8 @@ def main() -> int:
     assert cluster_refresh["article_count"] >= 2, cluster_refresh
     assert cluster_refresh["card_count"] >= 1, cluster_refresh
     assert cluster_refresh["run"]["summary"]["cross_language_cluster_count"] >= 1, cluster_refresh
+    assert cluster_refresh["run"]["summary"]["coverage_gap_task_count"] >= 1, cluster_refresh
+    assert cluster_refresh["run"]["summary"]["suggested_source_search_count"] >= 1, cluster_refresh
     cross_language_clusters = [
         cluster
         for cluster in cluster_refresh["clusters"]
@@ -687,6 +689,8 @@ def main() -> int:
     ]
     assert cross_language_clusters, cluster_refresh
     assert cross_language_clusters[0]["provider_metadata"]["language_bridge_terms"], cross_language_clusters
+    assert cross_language_clusters[0]["provider_metadata"]["automation"]["coverage_gap_tasks"], cross_language_clusters
+    assert cross_language_clusters[0]["provider_metadata"]["automation"]["suggested_source_searches"], cross_language_clusters
     assert store.EVENT_CLUSTERS and store.EVENT_CLUSTER_ARTICLES, cluster_refresh
     cluster_runs = _assert_ok(
         client.get("/api/v1/intelligence/clusters/runs", headers=admin_headers),
@@ -712,18 +716,21 @@ def main() -> int:
     ).json()
     assert cluster_detail["cluster"]["id"] == clusters["items"][0]["id"], cluster_detail
     assert cluster_detail["articles"], cluster_detail
+    assert "coverage_gap_tasks" in cluster_detail, cluster_detail
     clustered_compare = _assert_ok(
         client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
         "compare/ingested-article-clustered",
     ).json()
     assert clustered_compare["event_cluster"]["id"], clustered_compare
     assert clustered_compare["event_cluster"]["cluster_quality"]["quality_score"] > 0, clustered_compare
+    assert clustered_compare["event_cluster"]["coverage_gap_tasks"], clustered_compare
     cluster_feed = _assert_ok(
         client.get("/api/v1/feed?filter_type=narrative&limit=30", headers=headers),
         "feed/event-cluster-cards",
     ).json()
     cluster_card_types = {item["card_type"] for item in cluster_feed["cards"]}
     assert "cross_language_cluster" in cluster_card_types, cluster_feed
+    assert "coverage_gap" in cluster_card_types, cluster_feed
 
     pipeline_article = ExtractedArticle(
         url="https://example.com/pipeline-grid-resilience-follow-up",

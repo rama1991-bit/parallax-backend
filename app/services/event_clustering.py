@@ -217,6 +217,10 @@ CROSS_LANGUAGE_ALIAS_LOOKUP = {
 }
 
 
+TARGET_COVERAGE_LANGUAGES = ("English", "Spanish", "Arabic", "French", "Persian")
+TARGET_SOURCE_TYPES = ("news_agency", "broadcaster", "newspaper", "official", "NGO")
+
+
 def _tokens(value: Any) -> list[str]:
     text = _normalize(value)
     tokens = []
@@ -465,6 +469,181 @@ def _article_excerpt(article: dict) -> dict:
     }
 
 
+def _search_query(*parts: Any) -> str:
+    terms = []
+    for part in parts:
+        if isinstance(part, list):
+            terms.extend(str(item) for item in part if item)
+        elif part:
+            terms.append(str(part))
+    return " ".join(dict.fromkeys(term.strip() for term in terms if term and term.strip()))[:240]
+
+
+def _cluster_automation(
+    *,
+    title: str,
+    primary_topic: str | None,
+    languages: list[str],
+    countries: list[str],
+    source_count: int,
+    article_count: int,
+    analyzed_count: int,
+    claims: list[str],
+    frames: list[str],
+    bridge_terms: list[str],
+    quality_score: float,
+) -> dict:
+    language_lookup = {str(language).lower() for language in languages}
+    missing_languages = [
+        language
+        for language in TARGET_COVERAGE_LANGUAGES
+        if language.lower() not in language_lookup
+    ][:3]
+    terms = [primary_topic or title, *bridge_terms[:3], *frames[:2]]
+    tasks = []
+    searches = []
+
+    def add_search(language: str | None, reason: str, source_type: str | None = None):
+        query = _search_query(primary_topic or title, bridge_terms[:3], language, source_type, "news", "rss")
+        searches.append(
+            {
+                "query": query,
+                "language": language,
+                "source_type": source_type,
+                "reason": reason,
+            }
+        )
+
+    if source_count < 3:
+        tasks.append(
+            {
+                "type": "source_diversity_gap",
+                "priority": "high" if source_count <= 1 else "medium",
+                "label": "Add more independent source coverage",
+                "reason": f"This cluster has {source_count} source{'s' if source_count != 1 else ''}; add at least {max(0, 3 - source_count)} more source perspectives before treating the story as broadly covered.",
+                "target_source_types": list(TARGET_SOURCE_TYPES[:3]),
+                "search_query": _search_query(primary_topic or title, bridge_terms[:3], "independent source coverage"),
+            }
+        )
+        for source_type in TARGET_SOURCE_TYPES[:2]:
+            add_search(None, "Find another source type for this event.", source_type)
+
+    if missing_languages:
+        tasks.append(
+            {
+                "type": "language_gap",
+                "priority": "medium",
+                "label": "Search missing language coverage",
+                "reason": "The event has not been observed in several target languages yet.",
+                "target_languages": missing_languages,
+                "search_query": _search_query(primary_topic or title, bridge_terms[:3], missing_languages[0], "coverage"),
+            }
+        )
+        for language in missing_languages:
+            add_search(language, "Find coverage in a missing language.")
+
+    if len(countries) < 2:
+        tasks.append(
+            {
+                "type": "regional_gap",
+                "priority": "medium",
+                "label": "Add regional contrast",
+                "reason": "The cluster has limited country diversity; regional outlets may frame the same event differently.",
+                "target_regions": ["regional outlet", "local official source"],
+                "search_query": _search_query(primary_topic or title, bridge_terms[:3], "regional coverage"),
+            }
+        )
+
+    if analyzed_count < article_count:
+        tasks.append(
+            {
+                "type": "analysis_gap",
+                "priority": "high",
+                "label": "Analyze remaining matched articles",
+                "reason": f"{article_count - analyzed_count} matched article{'s' if article_count - analyzed_count != 1 else ''} still need structured analysis before claim and frame gaps are reliable.",
+                "target_status": "pending_analysis",
+                "search_query": "",
+            }
+        )
+
+    if claims and article_count >= 2:
+        tasks.append(
+            {
+                "type": "claim_verification_gap",
+                "priority": "medium",
+                "label": "Compare recurring claims across source types",
+                "reason": "Recurring claims should be compared across source types before becoming narrative signals.",
+                "claims": claims[:3],
+                "search_query": _search_query(claims[:2], "official statement", "NGO report"),
+            }
+        )
+        searches.append(
+            {
+                "query": _search_query(claims[:2], "official document", "statement"),
+                "language": None,
+                "source_type": "official",
+                "reason": "Look for official-document context around recurring claims.",
+            }
+        )
+
+    if quality_score < 0.55:
+        tasks.append(
+            {
+                "type": "cluster_quality_gap",
+                "priority": "medium",
+                "label": "Review weak cluster evidence",
+                "reason": "The cluster quality score is low enough that similarity evidence should be manually checked.",
+                "quality_score": quality_score,
+                "search_query": _search_query(title, bridge_terms[:3], "same event"),
+            }
+        )
+
+    deduped_searches = []
+    seen_queries = set()
+    for search in searches:
+        query = search.get("query")
+        key = str(query).lower()
+        if not query or key in seen_queries:
+            continue
+        seen_queries.add(key)
+        deduped_searches.append(search)
+        if len(deduped_searches) >= 8:
+            break
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    tasks.sort(key=lambda task: priority_order.get(task.get("priority"), 3))
+    tasks = tasks[:8]
+    automation_score = round(
+        min(
+            len([task for task in tasks if task.get("priority") == "high"]) * 0.28
+            + len(tasks) * 0.08
+            + (1 - min(quality_score, 1.0)) * 0.24,
+            1.0,
+        ),
+        3,
+    )
+    return {
+        "coverage_gap_tasks": tasks,
+        "suggested_source_searches": deduped_searches,
+        "recommended_actions": [
+            {
+                "type": task.get("type"),
+                "label": task.get("label"),
+                "priority": task.get("priority"),
+                "reason": task.get("reason"),
+                "search_query": task.get("search_query"),
+            }
+            for task in tasks[:5]
+        ],
+        "automation_score": automation_score,
+        "terms": list(dict.fromkeys(str(term) for term in terms if term))[:8],
+        "limitations": [
+            "Automation tasks identify missing context to collect; they are not editorial judgments.",
+            "Suggested searches are prompts for source discovery and should be reviewed before adding sources.",
+        ],
+    }
+
+
 def _cluster_provider_metadata(
     *,
     article_count: int,
@@ -472,6 +651,12 @@ def _cluster_provider_metadata(
     source_count: int,
     language_count: int,
     country_count: int,
+    title: str,
+    primary_topic: str | None,
+    languages: list[str],
+    countries: list[str],
+    claims: list[str],
+    frames: list[str],
     matches: dict,
 ) -> dict:
     match_scores = [
@@ -499,6 +684,7 @@ def _cluster_provider_metadata(
     bridge_terms = []
     for match in matches.values():
         bridge_terms.extend(match.get("semantic_terms") or [])
+    bridge_term_values = _top_values(bridge_terms, limit=10)
 
     metadata = intelligence_provider.provider_metadata(
         task="event_clustering",
@@ -518,7 +704,20 @@ def _cluster_provider_metadata(
         "cross_language": language_count >= 2,
         "cross_source": source_count >= 2,
     }
-    metadata["language_bridge_terms"] = _top_values(bridge_terms, limit=10)
+    metadata["language_bridge_terms"] = bridge_term_values
+    metadata["automation"] = _cluster_automation(
+        title=title,
+        primary_topic=primary_topic,
+        languages=languages,
+        countries=countries,
+        source_count=source_count,
+        article_count=article_count,
+        analyzed_count=analyzed_count,
+        claims=claims,
+        frames=frames,
+        bridge_terms=bridge_term_values,
+        quality_score=quality_score,
+    )
     metadata["limitations"] = [
         "Cross-language clustering uses bounded alias matching and article metadata; it is retrieval context, not translation.",
         "High cluster quality means stronger retrieval evidence, not agreement or factual confirmation.",
@@ -625,14 +824,6 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
     country_count = len(countries)
     frame_values = _top_values(frames, limit=8)
     claim_values = _top_values(claims, limit=8)
-    provider_metadata = _cluster_provider_metadata(
-        article_count=article_count,
-        analyzed_count=analyzed_count,
-        source_count=source_count,
-        language_count=language_count,
-        country_count=country_count,
-        matches=working.get("matches") or {},
-    )
     summary = (
         f"{article_count} article{'s' if article_count != 1 else ''} across "
         f"{source_count} source{'s' if source_count != 1 else ''}"
@@ -643,6 +834,20 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
 
     first_seen = min(times).isoformat() if times else None
     latest_seen = max(times).isoformat() if times else None
+    provider_metadata = _cluster_provider_metadata(
+        article_count=article_count,
+        analyzed_count=analyzed_count,
+        source_count=source_count,
+        language_count=language_count,
+        country_count=country_count,
+        title=latest_title,
+        primary_topic=primary_topic,
+        languages=languages,
+        countries=countries,
+        claims=claim_values,
+        frames=frame_values,
+        matches=working.get("matches") or {},
+    )
     cluster = {
         "id": cluster_id,
         "cluster_key": cluster_key,
@@ -736,6 +941,10 @@ def _build_cluster_feed_cards(
         provider_metadata = cluster.get("provider_metadata") or {}
         cluster_quality = provider_metadata.get("cluster_quality") or {}
         source_diversity = provider_metadata.get("source_diversity") or {}
+        automation = provider_metadata.get("automation") or {}
+        coverage_gap_tasks = automation.get("coverage_gap_tasks") or []
+        suggested_source_searches = automation.get("suggested_source_searches") or []
+        recommended_actions = automation.get("recommended_actions") or []
         href = f"/compare?articleId={base_article.get('id')}" if base_article.get("id") else "/compare"
         payload = {
             "event_cluster": True,
@@ -756,6 +965,9 @@ def _build_cluster_feed_cards(
             "cluster_quality": cluster_quality,
             "source_diversity": source_diversity,
             "language_bridge_terms": provider_metadata.get("language_bridge_terms") or [],
+            "automation": automation,
+            "coverage_gap_tasks": coverage_gap_tasks,
+            "suggested_source_searches": suggested_source_searches,
         }
         if article_count >= 2:
             cards.append(
@@ -781,7 +993,17 @@ def _build_cluster_feed_cards(
                             "label": "Compare cluster",
                             "href": href,
                             "reason": "Inspect title, framing, source, and timeline differences.",
-                        }
+                        },
+                        *[
+                            {
+                                "type": "coverage_task",
+                                "label": action.get("label"),
+                                "href": "/sources",
+                                "reason": action.get("reason"),
+                                "search_query": action.get("search_query"),
+                            }
+                            for action in recommended_actions[:2]
+                        ],
                     ],
                     "explanation": {
                         "why_this_matters": "The same story appears across multiple ingested articles.",
@@ -821,7 +1043,17 @@ def _build_cluster_feed_cards(
                             "label": "Compare languages",
                             "href": href,
                             "reason": "Check whether translated or regional coverage adds or omits claims.",
-                        }
+                        },
+                        *[
+                            {
+                                "type": "source_search",
+                                "label": f"Search {search.get('language') or search.get('source_type') or 'source'}",
+                                "href": "/sources",
+                                "reason": search.get("reason"),
+                                "search_query": search.get("query"),
+                            }
+                            for search in suggested_source_searches[:2]
+                        ],
                     ],
                     "explanation": {
                         "why_this_matters": "The same event has crossed language boundaries.",
@@ -832,6 +1064,56 @@ def _build_cluster_feed_cards(
                         "recommended_action": "Review framing by language and source type.",
                     },
                     "analysis": {"event_cluster": cluster},
+                }
+            )
+        if len(cards) >= card_limit:
+            break
+        if coverage_gap_tasks:
+            first_task = coverage_gap_tasks[0]
+            cards.append(
+                {
+                    "id": str(uuid4()),
+                    "session_id": session_id,
+                    "ingested_article_id": base_article.get("id"),
+                    "card_type": "coverage_gap",
+                    "title": f"Coverage tasks: {cluster.get('title')}",
+                    "summary": first_task.get("reason") or "This cluster has source, language, analysis, or claim coverage gaps to close.",
+                    "url": base_article.get("url"),
+                    "topic": cluster.get("primary_topic") or "Coverage gap",
+                    "priority": 0.84 if first_task.get("priority") == "high" else 0.72,
+                    "priority_score": 0.84 if first_task.get("priority") == "high" else 0.72,
+                    "personalized_score": 0.84 if first_task.get("priority") == "high" else 0.72,
+                    "narrative_signal": "The cluster has concrete follow-up tasks before coverage can be treated as robust.",
+                    "framing": (cluster.get("frames") or [None])[0],
+                    "payload": {**payload, "signal_reason": "coverage_gap_tasks"},
+                    "recommendations": [
+                        {
+                            "type": "compare",
+                            "label": "Review compare",
+                            "href": href,
+                            "reason": "Inspect the current source and claim differences before adding more coverage.",
+                        },
+                        *[
+                            {
+                                "type": "coverage_task",
+                                "label": task.get("label"),
+                                "href": "/sources",
+                                "reason": task.get("reason"),
+                                "search_query": task.get("search_query"),
+                            }
+                            for task in coverage_gap_tasks[:3]
+                        ],
+                    ],
+                    "explanation": {
+                        "why_this_matters": "The system found specific missing coverage needed to make this event cluster more operational.",
+                        "what_changed": {
+                            "task_count": len(coverage_gap_tasks),
+                            "source_search_count": len(suggested_source_searches),
+                            "automation_score": automation.get("automation_score"),
+                        },
+                        "recommended_action": "Use the suggested searches to add or sync missing source perspectives.",
+                    },
+                    "analysis": {"event_cluster": cluster, "automation": automation},
                 }
             )
         if len(cards) >= card_limit:
@@ -971,6 +1253,10 @@ def refresh_event_clusters(
         for cluster in saved_clusters
     ]
     quality_scores = [float(score) for score in quality_scores if score is not None]
+    automation_payloads = [
+        ((cluster.get("provider_metadata") or {}).get("automation") or {})
+        for cluster in saved_clusters
+    ]
     cross_language_count = len(
         [
             cluster
@@ -985,6 +1271,8 @@ def refresh_event_clusters(
         "create_cards": create_cards,
         "cross_language_cluster_count": cross_language_count,
         "average_cluster_quality": round(sum(quality_scores) / max(len(quality_scores), 1), 3),
+        "coverage_gap_task_count": sum(len(item.get("coverage_gap_tasks") or []) for item in automation_payloads),
+        "suggested_source_search_count": sum(len(item.get("suggested_source_searches") or []) for item in automation_payloads),
     }
     run = save_event_cluster_refresh_run(
         run_id=run_id,
@@ -1076,6 +1364,8 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
     cluster = get_event_cluster(cluster_id)
     if not cluster:
         raise FeedStoreError("Event cluster not found.")
+    metadata = cluster.get("provider_metadata") or {}
+    automation = metadata.get("automation") or {}
     memberships = list_event_cluster_articles(cluster_id, limit=100)
     articles = [
         {
@@ -1100,6 +1390,9 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
                 else "/compare"
             ),
         },
+        "automation": automation,
+        "coverage_gap_tasks": automation.get("coverage_gap_tasks") or [],
+        "suggested_source_searches": automation.get("suggested_source_searches") or [],
         "limitations": [
             "Event clustering is a retrieval signal, not a factual verdict.",
             "Cross-language matching is heuristic and can miss translations, synonyms, and local naming differences.",
