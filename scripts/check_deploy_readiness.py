@@ -22,9 +22,10 @@ EVENT_CLUSTER_SCHEDULER_COMMAND = (
     "python scripts/refresh_event_clusters.py --article-limit 250 "
     "--cluster-limit 100 --card-limit 50"
 )
+ARTICLE_ANALYSIS_SCHEDULER_COMMAND = "python scripts/analyze_pending_articles.py --limit 25"
 PIPELINE_SCHEDULER_COMMAND = (
     "python scripts/run_intelligence_pipeline.py --source-limit 50 --feed-limit 100 "
-    "--sync-article-limit 10 --sync-card-limit 25 --intelligence-source-limit 50 "
+    "--sync-article-limit 10 --sync-card-limit 25 --analysis-article-limit 25 --intelligence-source-limit 50 "
     "--topic-limit 50 --intelligence-article-limit 100 --intelligence-card-limit 50 "
     "--cluster-article-limit 250 --cluster-limit 100 --cluster-card-limit 50"
 )
@@ -417,10 +418,14 @@ def build_report(strict: bool = False) -> dict[str, Any]:
         "errors": [issue.as_dict() for issue in errors],
         "warnings": [issue.as_dict() for issue in warnings],
         "scheduler": {
-            "purpose": "Run active RSS source ingestion on a recurring worker or platform scheduler.",
+            "purpose": "Run active RSS/homepage source ingestion on a recurring worker or platform scheduler.",
             "recommended_interval": "15 minutes",
             "command": SCHEDULER_COMMAND,
-            "pipeline_purpose": "Run ingestion, source/topic snapshots, and event clusters in one scheduler job.",
+            "analysis_purpose": "Analyze pending ingested articles before aggregation and clustering.",
+            "analysis_interval": "15-60 minutes after ingestion",
+            "analysis_command": ARTICLE_ANALYSIS_SCHEDULER_COMMAND,
+            "analysis_api_alternative": "POST /api/v1/sources/articles/analyze-pending with X-Parallax-Admin-Key",
+            "pipeline_purpose": "Run ingestion, pending article analysis, source/topic snapshots, and event clusters in one scheduler job.",
             "pipeline_interval": "15-60 minutes, depending on feed volume",
             "pipeline_command": PIPELINE_SCHEDULER_COMMAND,
             "pipeline_api_alternative": "POST /api/v1/intelligence/pipeline/run with X-Parallax-Admin-Key",
@@ -462,6 +467,9 @@ def print_text(report: dict[str, Any]) -> None:
     print("\nScheduler:")
     print(f"- Interval: {report['scheduler']['recommended_interval']}")
     print(f"- Command: {report['scheduler']['command']}")
+    print(f"- Analysis interval: {report['scheduler']['analysis_interval']}")
+    print(f"- Analysis command: {report['scheduler']['analysis_command']}")
+    print(f"- Analysis API alternative: {report['scheduler']['analysis_api_alternative']}")
     print(f"- Pipeline interval: {report['scheduler']['pipeline_interval']}")
     print(f"- Pipeline command: {report['scheduler']['pipeline_command']}")
     print(f"- Pipeline API alternative: {report['scheduler']['pipeline_api_alternative']}")

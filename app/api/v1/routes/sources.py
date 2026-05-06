@@ -34,6 +34,7 @@ from app.services.feed.store import (
 )
 from app.services.ops_notifications import deliver_source_ops_alerts
 from app.services.intelligence_aggregation import build_source_intelligence
+from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
@@ -342,6 +343,25 @@ async def update_source_feed_status(
     except FeedStoreError as exc:
         if str(exc) == "Source feed not found.":
             raise HTTPException(status_code=404, detail="Source feed not found") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/articles/analyze-pending")
+async def analyze_pending_source_articles(
+    session_id: str = Depends(get_session_id),
+    source_id: str | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
+    include_failed: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await analyze_pending_ingested_articles(
+            session_id=session_id,
+            source_id=source_id,
+            limit=limit,
+            include_failed=include_failed,
+        )
+    except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

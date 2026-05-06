@@ -24,6 +24,7 @@ from app.api.v1.routes import analyze as analyze_route  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.articles import ExtractedArticle  # noqa: E402
 from app.services import analysis as analysis_service  # noqa: E402
+from app.services import ingested_analysis as ingested_analysis_service  # noqa: E402
 from app.services import intelligence as intelligence_service  # noqa: E402
 from app.services import ops_notifications as ops_notification_service  # noqa: E402
 from app.services import osint as osint_service  # noqa: E402
@@ -475,12 +476,13 @@ def main() -> int:
     assert source_sync_runs and source_sync_runs[0]["source_id"] == source["id"], source_sync_runs
 
     original_fetch_article = analyze_route.fetch_article
+    original_ingested_fetch_article = ingested_analysis_service.fetch_article
 
     async def fake_fetch_article(url: str):
-        raise analyze_route.ArticleFetchError("Fixture fetch failure for metadata fallback.")
+        raise ingested_analysis_service.ArticleFetchError("Fixture fetch failure for metadata fallback.")
 
     try:
-        analyze_route.fetch_article = fake_fetch_article
+        ingested_analysis_service.fetch_article = fake_fetch_article
         ingested_analysis = _assert_ok(
             client.post(
                 "/api/v1/analyze",
@@ -490,7 +492,7 @@ def main() -> int:
             "analyze/ingested-article",
         ).json()
     finally:
-        analyze_route.fetch_article = original_fetch_article
+        ingested_analysis_service.fetch_article = original_ingested_fetch_article
 
     assert ingested_analysis["ingested_article_id"] == ingested_article_id, ingested_analysis
     assert ingested_analysis["card"]["payload"]["analysis_status"] == "analyzed", ingested_analysis
@@ -580,6 +582,27 @@ def main() -> int:
     assert denied_intelligence_refresh.status_code == 403, denied_intelligence_refresh.text
     denied_pipeline = client.post("/api/v1/intelligence/pipeline/run", headers=headers)
     assert denied_pipeline.status_code == 403, denied_pipeline.text
+    denied_pending_analysis = client.post("/api/v1/sources/articles/analyze-pending", headers=headers)
+    assert denied_pending_analysis.status_code == 403, denied_pending_analysis.text
+
+    original_pending_fetch_article = ingested_analysis_service.fetch_article
+    try:
+        ingested_analysis_service.fetch_article = fake_fetch_article
+        pending_analysis = _assert_ok(
+            client.post(
+                f"/api/v1/sources/articles/analyze-pending?source_id={comparison_source['id']}&limit=2",
+                headers=admin_headers,
+            ),
+            "sources/articles-analyze-pending",
+        ).json()
+    finally:
+        ingested_analysis_service.fetch_article = original_pending_fetch_article
+
+    assert pending_analysis["status"] == "completed", pending_analysis
+    assert pending_analysis["candidate_count"] == 1, pending_analysis
+    assert pending_analysis["analyzed_count"] == 1, pending_analysis
+    assert pending_analysis["results"][0]["report_id"], pending_analysis
+
     batch_intelligence = _assert_ok(
         client.post(
             "/api/v1/intelligence/refresh?source_limit=2&topic_limit=2&article_limit=20&card_limit=6",
@@ -655,8 +678,22 @@ def main() -> int:
     cluster_card_types = {item["card_type"] for item in cluster_feed["cards"]}
     assert {"event_cluster", "cross_language_cluster", "source_divergence", "missing_coverage"} & cluster_card_types, cluster_feed
 
+    pipeline_article = ExtractedArticle(
+        url="https://example.com/pipeline-grid-resilience-follow-up",
+        final_url="https://example.com/pipeline-grid-resilience-follow-up",
+        title="Pipeline detects grid resilience follow-up",
+        source="Example Daily",
+        domain="example.com",
+        text="Officials reported a grid resilience follow-up because regulators announced cost controls. " * 30,
+        excerpt="Officials reported a grid resilience follow-up because regulators announced cost controls.",
+    )
+
+    async def fake_pipeline_fetch_article(url: str):
+        return pipeline_article
+
     original_pipeline_parse_rss_feed = source_sync_service.parse_rss_feed
     original_pipeline_parse_homepage_feed = source_sync_service.parse_homepage_feed
+    original_pipeline_fetch_article = ingested_analysis_service.fetch_article
 
     async def fake_pipeline_parse_rss_feed(url: str, limit: int = 20):
         return {
@@ -678,9 +715,10 @@ def main() -> int:
     try:
         source_sync_service.parse_rss_feed = fake_pipeline_parse_rss_feed
         source_sync_service.parse_homepage_feed = fake_parse_homepage_feed
+        ingested_analysis_service.fetch_article = fake_pipeline_fetch_article
         pipeline = _assert_ok(
             client.post(
-                "/api/v1/intelligence/pipeline/run?source_limit=2&feed_limit=2&sync_article_limit=1&sync_card_limit=2&intelligence_source_limit=2&topic_limit=2&intelligence_article_limit=20&intelligence_card_limit=4&cluster_article_limit=50&cluster_limit=20&cluster_card_limit=6",
+                "/api/v1/intelligence/pipeline/run?source_limit=2&feed_limit=2&sync_article_limit=1&sync_card_limit=2&analysis_article_limit=4&intelligence_source_limit=2&topic_limit=2&intelligence_article_limit=20&intelligence_card_limit=4&cluster_article_limit=50&cluster_limit=20&cluster_card_limit=6",
                 headers=admin_headers,
             ),
             "intelligence/pipeline-run",
@@ -688,11 +726,13 @@ def main() -> int:
     finally:
         source_sync_service.parse_rss_feed = original_pipeline_parse_rss_feed
         source_sync_service.parse_homepage_feed = original_pipeline_parse_homepage_feed
+        ingested_analysis_service.fetch_article = original_pipeline_fetch_article
 
     assert pipeline["pipeline_id"], pipeline
     assert pipeline["status"] in {"completed", "partial"}, pipeline
     phase_names = {phase["name"] for phase in pipeline["phases"]}
-    assert {"source_sync", "intelligence_refresh", "event_clusters"} <= phase_names, pipeline
+    assert {"source_sync", "article_analysis", "intelligence_refresh", "event_clusters"} <= phase_names, pipeline
+    assert pipeline["summary"]["analyzed_article_count"] >= 1, pipeline
     assert pipeline["summary"]["feed_card_count"] >= 1, pipeline
     assert pipeline["summary"]["cluster_count"] >= 1, pipeline
 

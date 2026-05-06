@@ -6,6 +6,7 @@ from uuid import uuid4
 from app.core.session import ANONYMOUS_SESSION_ID
 from app.services.event_clustering import refresh_event_clusters
 from app.services.feed.store import FeedStoreError
+from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.intelligence_aggregation import refresh_intelligence_snapshots
 from app.services.source_sync import sync_active_source_feeds
 
@@ -28,6 +29,7 @@ async def run_intelligence_pipeline(
     feed_limit: int = 100,
     sync_article_limit: int = 10,
     sync_card_limit: int = 25,
+    analysis_article_limit: int = 25,
     intelligence_source_limit: int = 50,
     topic_limit: int = 50,
     intelligence_article_limit: int = 100,
@@ -36,6 +38,7 @@ async def run_intelligence_pipeline(
     cluster_limit: int = 100,
     cluster_card_limit: int = 50,
     skip_sync: bool = False,
+    skip_analysis: bool = False,
     skip_intelligence: bool = False,
     skip_clusters: bool = False,
 ) -> dict:
@@ -78,6 +81,33 @@ async def run_intelligence_pipeline(
             phases.append({"name": "source_sync", "status": "failed", "error_count": 1})
     else:
         phases.append({"name": "source_sync", "status": "skipped", "error_count": 0})
+
+    if not skip_analysis:
+        try:
+            analysis_result = await analyze_pending_ingested_articles(
+                session_id=session_id,
+                limit=analysis_article_limit,
+            )
+            phases.append(
+                {
+                    "name": "article_analysis",
+                    "status": analysis_result.get("status"),
+                    "candidate_count": analysis_result.get("candidate_count", 0),
+                    "article_count": analysis_result.get("analyzed_count", 0),
+                    "failed_count": analysis_result.get("failed_count", 0),
+                    "error_count": len(analysis_result.get("errors") or []),
+                    "summary": analysis_result.get("summary") or {},
+                }
+            )
+            errors.extend(
+                {"phase": "article_analysis", **error}
+                for error in (analysis_result.get("errors") or [])
+            )
+        except FeedStoreError as exc:
+            errors.append({"phase": "article_analysis", "error": str(exc)})
+            phases.append({"name": "article_analysis", "status": "failed", "error_count": 1})
+    else:
+        phases.append({"name": "article_analysis", "status": "skipped", "error_count": 0})
 
     if not skip_intelligence:
         try:
@@ -150,6 +180,11 @@ async def run_intelligence_pipeline(
             "skipped_phase_count": len([phase for phase in phases if phase.get("status") == "skipped"]),
             "error_count": len(errors),
             "feed_card_count": sum(int(phase.get("card_count") or 0) for phase in phases),
+            "analyzed_article_count": sum(
+                int(phase.get("article_count") or 0)
+                for phase in phases
+                if phase.get("name") == "article_analysis"
+            ),
             "article_count": sum(
                 int(phase.get("article_count") or 0)
                 for phase in phases
@@ -165,6 +200,7 @@ async def run_intelligence_pipeline(
             "feed_limit": feed_limit,
             "sync_article_limit": sync_article_limit,
             "sync_card_limit": sync_card_limit,
+            "analysis_article_limit": analysis_article_limit,
             "intelligence_source_limit": intelligence_source_limit,
             "topic_limit": topic_limit,
             "intelligence_article_limit": intelligence_article_limit,

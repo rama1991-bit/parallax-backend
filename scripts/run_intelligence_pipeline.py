@@ -1,8 +1,9 @@
 """
 Run the full scheduled Parallax intelligence pipeline.
 
-This orchestrates active source ingestion, source/topic intelligence snapshots,
-and event clustering in the same order an external scheduler should use.
+This orchestrates active source ingestion, pending article analysis,
+source/topic intelligence snapshots, and event clustering in the same order an
+external scheduler should use.
 """
 
 from __future__ import annotations
@@ -19,9 +20,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run Parallax intelligence automation pipeline.")
     parser.add_argument("--session-id", default=ANONYMOUS_SESSION_ID, help="Session id for generated feed cards.")
     parser.add_argument("--source-limit", type=int, default=50, help="Maximum sources to inspect.")
-    parser.add_argument("--feed-limit", type=int, default=100, help="Maximum RSS feeds to fetch.")
-    parser.add_argument("--sync-article-limit", type=int, default=10, help="Maximum articles per RSS feed.")
+    parser.add_argument("--feed-limit", type=int, default=100, help="Maximum feeds to inspect.")
+    parser.add_argument("--sync-article-limit", type=int, default=10, help="Maximum articles per feed.")
     parser.add_argument("--sync-card-limit", type=int, default=25, help="Maximum ingestion feed cards.")
+    parser.add_argument("--analysis-article-limit", type=int, default=25, help="Maximum pending ingested articles to analyze.")
     parser.add_argument("--intelligence-source-limit", type=int, default=50, help="Maximum source snapshots.")
     parser.add_argument("--topic-limit", type=int, default=50, help="Maximum topic snapshots.")
     parser.add_argument("--intelligence-article-limit", type=int, default=100, help="Maximum articles per snapshot.")
@@ -30,6 +32,7 @@ def main() -> int:
     parser.add_argument("--cluster-limit", type=int, default=100, help="Maximum event clusters.")
     parser.add_argument("--cluster-card-limit", type=int, default=50, help="Maximum event-cluster feed cards.")
     parser.add_argument("--skip-sync", action="store_true", help="Skip source ingestion.")
+    parser.add_argument("--skip-analysis", action="store_true", help="Skip pending ingested article analysis.")
     parser.add_argument("--skip-intelligence", action="store_true", help="Skip source/topic intelligence refresh.")
     parser.add_argument("--skip-clusters", action="store_true", help="Skip event clustering.")
     args = parser.parse_args()
@@ -41,6 +44,7 @@ def main() -> int:
             feed_limit=args.feed_limit,
             sync_article_limit=args.sync_article_limit,
             sync_card_limit=args.sync_card_limit,
+            analysis_article_limit=args.analysis_article_limit,
             intelligence_source_limit=args.intelligence_source_limit,
             topic_limit=args.topic_limit,
             intelligence_article_limit=args.intelligence_article_limit,
@@ -49,6 +53,7 @@ def main() -> int:
             cluster_limit=args.cluster_limit,
             cluster_card_limit=args.cluster_card_limit,
             skip_sync=args.skip_sync,
+            skip_analysis=args.skip_analysis,
             skip_intelligence=args.skip_intelligence,
             skip_clusters=args.skip_clusters,
         )
