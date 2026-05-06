@@ -84,6 +84,21 @@ def _ordered_difference(left: list[str], right: list[str]) -> list[str]:
     return [item for item in left if item.lower() not in right_lookup]
 
 
+def _unique_strings(items: list[str], limit: int | None = None) -> list[str]:
+    seen = set()
+    ordered = []
+    for item in items:
+        text = str(item).strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+        if limit and len(ordered) >= limit:
+            break
+    return ordered
+
+
 def _report_side(card: dict) -> dict:
     payload = card.get("payload") or {}
     analysis = card.get("analysis") or {}
@@ -265,6 +280,38 @@ def _article_missing_context(article: dict) -> list[str]:
     return missing
 
 
+def _article_entities(article: dict) -> list[str]:
+    analysis = _article_analysis(article)
+    intelligence = _article_intelligence(article)
+    collected: list[str] = []
+
+    def collect(value):
+        if isinstance(value, str):
+            collected.append(value)
+            return
+        if isinstance(value, dict):
+            label = (
+                value.get("name")
+                or value.get("label")
+                or value.get("text")
+                or value.get("entity")
+                or value.get("title")
+            )
+            if label:
+                collected.append(str(label))
+                return
+            for nested in value.values():
+                collect(nested)
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(analysis.get("entities"))
+    collect(intelligence.get("entities"))
+    return _unique_strings(collected, limit=24)
+
+
 def _article_keywords(article: dict) -> list[str]:
     keywords = [str(item).lower() for item in article.get("comparison_keywords") or [] if item]
     keywords.extend(_tokens(article.get("title") or ""))
@@ -311,24 +358,33 @@ def _timeline_difference(base: dict, candidate: dict) -> dict:
 def _source_difference(base: dict, candidate: dict) -> dict:
     base_source = _article_source(base)
     candidate_source = _article_source(candidate)
+    base_profile = {
+        "id": base.get("source_id"),
+        "name": base_source.get("name"),
+        "country": base_source.get("country") or base.get("country"),
+        "language": base_source.get("language") or base.get("language"),
+        "source_type": base_source.get("source_type"),
+        "source_size": base_source.get("source_size"),
+    }
+    comparison_profile = {
+        "id": candidate.get("source_id"),
+        "name": candidate_source.get("name"),
+        "country": candidate_source.get("country") or candidate.get("country"),
+        "language": candidate_source.get("language") or candidate.get("language"),
+        "source_type": candidate_source.get("source_type"),
+        "source_size": candidate_source.get("source_size"),
+    }
+    differences = [
+        field
+        for field in ("country", "language", "source_type", "source_size")
+        if base_profile.get(field) and comparison_profile.get(field) and base_profile.get(field) != comparison_profile.get(field)
+    ]
     return {
-        "base_source": {
-            "id": base.get("source_id"),
-            "name": base_source.get("name"),
-            "country": base_source.get("country") or base.get("country"),
-            "language": base_source.get("language") or base.get("language"),
-            "source_type": base_source.get("source_type"),
-            "source_size": base_source.get("source_size"),
-        },
-        "comparison_source": {
-            "id": candidate.get("source_id"),
-            "name": candidate_source.get("name"),
-            "country": candidate_source.get("country") or candidate.get("country"),
-            "language": candidate_source.get("language") or candidate.get("language"),
-            "source_type": candidate_source.get("source_type"),
-            "source_size": candidate_source.get("source_size"),
-        },
+        "base_source": base_profile,
+        "comparison_source": comparison_profile,
         "same_source": bool(base.get("source_id") and base.get("source_id") == candidate.get("source_id")),
+        "differences": differences,
+        "source_contrast": " / ".join(differences) if differences else "same or unknown metadata",
     }
 
 
@@ -414,12 +470,124 @@ def _cluster_summary(cluster: dict | None) -> dict | None:
     }
 
 
+def _title_difference(base: dict, candidate: dict, similarity: dict) -> dict:
+    base_title = base.get("title") or ""
+    candidate_title = candidate.get("title") or ""
+    base_terms = sorted(_tokens(base_title) - _tokens(candidate_title))[:10]
+    comparison_terms = sorted(_tokens(candidate_title) - _tokens(base_title))[:10]
+    return {
+        "comparison_article_id": candidate.get("id"),
+        "base_title": base_title,
+        "comparison_title": candidate_title,
+        "title_similarity": similarity["title_score"],
+        "base_terms": base_terms,
+        "comparison_terms": comparison_terms,
+    }
+
+
+def _entity_overlap(base: dict, candidate: dict) -> dict:
+    base_entities = _article_entities(base)
+    candidate_entities = _article_entities(candidate)
+    return {
+        "shared": _ordered_intersection(base_entities, candidate_entities),
+        "base_only": _ordered_difference(base_entities, candidate_entities),
+        "comparison_only": _ordered_difference(candidate_entities, base_entities),
+    }
+
+
+def _coverage_gaps(
+    base: dict,
+    candidate: dict,
+    claim_overlap: dict,
+    source_difference: dict,
+    entity_overlap: dict,
+) -> list[dict]:
+    candidate_source = source_difference["comparison_source"].get("name") or "Comparison source"
+    gaps = []
+    if claim_overlap["left_unique"]:
+        gaps.append(
+            {
+                "type": "base_claims_missing_from_comparison",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "The comparison article does not surface these extracted base claims.",
+                "claims": claim_overlap["left_unique"][:8],
+            }
+        )
+    if claim_overlap["right_unique"]:
+        gaps.append(
+            {
+                "type": "comparison_adds_claims",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "The comparison article adds claims not detected in the base story.",
+                "claims": claim_overlap["right_unique"][:8],
+            }
+        )
+    if candidate.get("analysis_status") != "analyzed":
+        gaps.append(
+            {
+                "type": "comparison_unanalyzed",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "This match has not been structurally analyzed yet, so claim and frame coverage is limited.",
+                "claims": [],
+            }
+        )
+    if source_difference.get("same_source"):
+        gaps.append(
+            {
+                "type": "same_source_match",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "The closest match comes from the same source; cross-outlet confirmation is still needed.",
+                "claims": [],
+            }
+        )
+
+    base_profile = source_difference["base_source"]
+    comparison_profile = source_difference["comparison_source"]
+    same_country = (
+        base_profile.get("country")
+        and comparison_profile.get("country")
+        and base_profile.get("country") == comparison_profile.get("country")
+    )
+    same_language = (
+        base_profile.get("language")
+        and comparison_profile.get("language")
+        and base_profile.get("language") == comparison_profile.get("language")
+    )
+    if same_country and same_language:
+        gaps.append(
+            {
+                "type": "limited_source_diversity",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "The match shares country and language metadata with the base article; regional or language diversity remains thin.",
+                "claims": [],
+            }
+        )
+    if not entity_overlap["shared"] and (_article_entities(base) or _article_entities(candidate)):
+        gaps.append(
+            {
+                "type": "entity_context_gap",
+                "comparison_article_id": candidate.get("id"),
+                "source": candidate_source,
+                "reason": "The compared articles do not share extracted entities, so story alignment may depend mostly on topic keywords.",
+                "claims": [],
+            }
+        )
+    return gaps
+
+
 def _candidate_comparison(base: dict, candidate: dict, similarity: dict) -> dict:
     claim_overlap = _claim_overlap(_article_claims(base), _article_claims(candidate))
     base_frames = _article_frames(base)
     candidate_frames = _article_frames(candidate)
     source_difference = _source_difference(base, candidate)
     timeline_difference = _timeline_difference(base, candidate)
+    title_difference = _title_difference(base, candidate, similarity)
+    entity_overlap = _entity_overlap(base, candidate)
     base_source = source_difference["base_source"].get("name") or "Base source"
     candidate_source = source_difference["comparison_source"].get("name") or "Comparison source"
     base_tone = _article_tone(base)
@@ -447,6 +615,24 @@ def _candidate_comparison(base: dict, candidate: dict, similarity: dict) -> dict
             "claims": claim_overlap["right_unique"],
         },
     ]
+    missing_claims = []
+    if claim_overlap["left_unique"]:
+        missing_claims.append(
+            {
+                "comparison_article_id": candidate.get("id"),
+                "comparison_source": candidate_source,
+                "claims": claim_overlap["left_unique"],
+            }
+        )
+    added_claims = []
+    if claim_overlap["right_unique"]:
+        added_claims.append(
+            {
+                "comparison_article_id": candidate.get("id"),
+                "comparison_source": candidate_source,
+                "claims": claim_overlap["right_unique"],
+            }
+        )
     framing_differences = [
         {
             "comparison_article_id": candidate.get("id"),
@@ -465,22 +651,39 @@ def _candidate_comparison(base: dict, candidate: dict, similarity: dict) -> dict
         }
     ]
     missing_context = [*_article_missing_context(base), *_article_missing_context(candidate)]
+    coverage_gaps = _coverage_gaps(
+        base,
+        candidate,
+        claim_overlap=claim_overlap,
+        source_difference=source_difference,
+        entity_overlap=entity_overlap,
+    )
     confidence = round(max(similarity["score"], claim_overlap["score"]) * 0.7 + similarity["keyword_score"] * 0.3, 3)
     payload = {
         "base_article": _article_summary(base),
         "comparison_article": _article_summary(candidate, similarity=similarity),
         "claim_overlap": claim_overlap,
         "similarity_breakdown": similarity,
+        "title_difference": title_difference,
+        "missing_claims": missing_claims,
+        "added_claims": added_claims,
+        "coverage_gaps": coverage_gaps,
+        "entities": entity_overlap,
     }
 
     return {
+        "title_difference": title_difference,
         "shared_claims": shared_claims,
         "unique_claims_by_source": unique_claims_by_source,
+        "missing_claims": missing_claims,
+        "added_claims": added_claims,
         "framing_differences": framing_differences,
         "tone_differences": tone_differences,
         "missing_context": list(dict.fromkeys(missing_context)),
         "timeline_difference": timeline_difference,
         "source_difference": source_difference,
+        "coverage_gaps": coverage_gaps,
+        "entities": entity_overlap,
         "confidence": confidence,
         "comparison_payload": payload,
     }
@@ -530,40 +733,64 @@ def build_ingested_article_compare_result(article_id: str, limit: int = 8) -> di
             base_article_id=base["id"],
             comparison_article_id=candidate["id"],
             similarity_score=similarity["score"],
-            **comparison,
+            shared_claims=comparison["shared_claims"],
+            unique_claims_by_source=comparison["unique_claims_by_source"],
+            framing_differences=comparison["framing_differences"],
+            tone_differences=comparison["tone_differences"],
+            missing_context=comparison["missing_context"],
+            timeline_difference=comparison["timeline_difference"],
+            source_difference=comparison["source_difference"],
+            confidence=comparison["confidence"],
+            comparison_payload=comparison["comparison_payload"],
         )
         summary = _article_summary(candidate, similarity=similarity)
         summary["comparison_id"] = record["id"]
-        summary["title_difference"] = {
-            "base_title": base.get("title"),
-            "comparison_title": candidate.get("title"),
-            "title_similarity": similarity["title_score"],
-        }
+        summary["title_difference"] = comparison["title_difference"]
         summary["source_difference"] = comparison["source_difference"]
         summary["timeline_difference"] = comparison["timeline_difference"]
         similar_articles.append(summary)
         comparisons.append(comparison)
 
+    title_differences = []
     shared_claims = []
     unique_claims_by_source = []
+    missing_claims = []
+    added_claims = []
     framing_differences = []
     tone_differences = []
     missing_context = []
     timeline_differences = []
     source_differences = []
+    coverage_gaps = []
+    entity_shared = []
+    entity_base_only = []
+    entity_comparison_only = []
     for comparison in comparisons:
+        title_differences.append(comparison["title_difference"])
         shared_claims.extend(comparison["shared_claims"])
         unique_claims_by_source.extend(comparison["unique_claims_by_source"])
+        missing_claims.extend(comparison["missing_claims"])
+        added_claims.extend(comparison["added_claims"])
         framing_differences.extend(comparison["framing_differences"])
         tone_differences.extend(comparison["tone_differences"])
         missing_context.extend(comparison["missing_context"])
         timeline_differences.append(comparison["timeline_difference"])
         source_differences.append(comparison["source_difference"])
+        coverage_gaps.extend(comparison["coverage_gaps"])
+        entities = comparison["entities"]
+        entity_shared.extend(entities.get("shared") or [])
+        entity_base_only.extend(entities.get("base_only") or [])
+        entity_comparison_only.extend(entities.get("comparison_only") or [])
 
     confidence = round(
         sum(item["similarity"]["score"] for item in similar_articles) / max(len(similar_articles), 1),
         3,
     )
+    entities = {
+        "shared": _unique_strings(entity_shared, limit=24),
+        "base_only": _unique_strings(entity_base_only, limit=24),
+        "comparison_only": _unique_strings(entity_comparison_only, limit=24),
+    }
 
     return {
         "id": str(uuid4()),
@@ -571,14 +798,20 @@ def build_ingested_article_compare_result(article_id: str, limit: int = 8) -> di
         "base_article": _article_summary(base),
         "event_cluster": _cluster_summary(event_cluster),
         "similar_articles": similar_articles,
+        "entities": entities,
         "comparison": {
+            "title_differences": title_differences[:20],
             "shared_claims": shared_claims[:20],
             "unique_claims_by_source": unique_claims_by_source[:20],
+            "missing_claims": missing_claims[:20],
+            "added_claims": added_claims[:20],
             "framing_differences": framing_differences[:20],
             "tone_differences": tone_differences[:20],
             "missing_context": list(dict.fromkeys(missing_context))[:20],
             "timeline_difference": timeline_differences,
             "source_difference": source_differences,
+            "coverage_gaps": coverage_gaps[:20],
+            "entities": entities,
             "confidence": confidence,
         },
         "limitations": [

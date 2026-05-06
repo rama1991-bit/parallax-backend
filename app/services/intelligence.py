@@ -369,8 +369,11 @@ def sanitize_compare_result(raw: dict, base: dict) -> dict:
         **base,
         "comparison": {
             **base_comparison,
+            "title_differences": comparison.get("title_differences") if isinstance(comparison.get("title_differences"), list) else base_comparison.get("title_differences", []),
             "shared_claims": comparison.get("shared_claims") if isinstance(comparison.get("shared_claims"), list) else base_comparison.get("shared_claims", []),
             "unique_claims_by_source": comparison.get("unique_claims_by_source") if isinstance(comparison.get("unique_claims_by_source"), list) else base_comparison.get("unique_claims_by_source", []),
+            "missing_claims": comparison.get("missing_claims") if isinstance(comparison.get("missing_claims"), list) else base_comparison.get("missing_claims", []),
+            "added_claims": comparison.get("added_claims") if isinstance(comparison.get("added_claims"), list) else base_comparison.get("added_claims", []),
             "framing_differences": comparison.get("framing_differences") if isinstance(comparison.get("framing_differences"), list) else base_comparison.get("framing_differences", []),
             "tone_differences": comparison.get("tone_differences") if isinstance(comparison.get("tone_differences"), list) else base_comparison.get("tone_differences", []),
             "missing_context": safe_list(
@@ -379,9 +382,13 @@ def sanitize_compare_result(raw: dict, base: dict) -> dict:
             ),
             "timeline_difference": comparison.get("timeline_difference") if isinstance(comparison.get("timeline_difference"), list) else base_comparison.get("timeline_difference", []),
             "source_difference": comparison.get("source_difference") if isinstance(comparison.get("source_difference"), list) else base_comparison.get("source_difference", []),
+            "coverage_gaps": comparison.get("coverage_gaps") if isinstance(comparison.get("coverage_gaps"), list) else base_comparison.get("coverage_gaps", []),
+            "entities": comparison.get("entities") if isinstance(comparison.get("entities"), dict) else base_comparison.get("entities", {}),
             "confidence": round(clamp(comparison.get("confidence"), base_comparison.get("confidence", 0.0)), 3),
         },
     }
+    if isinstance(enhanced["comparison"].get("entities"), dict):
+        enhanced["entities"] = enhanced["comparison"]["entities"]
     return enhanced
 
 
@@ -401,13 +408,18 @@ async def enhance_compare_result(result: dict) -> dict:
     payload = {
         "compare_result": result,
         "required_comparison_schema": {
+            "title_differences": [],
             "shared_claims": [],
             "unique_claims_by_source": [],
+            "missing_claims": [],
+            "added_claims": [],
             "framing_differences": [],
             "tone_differences": [],
             "missing_context": [],
             "timeline_difference": [],
             "source_difference": [],
+            "coverage_gaps": [],
+            "entities": {"shared": [], "base_only": [], "comparison_only": []},
             "confidence": 0.0,
         },
     }

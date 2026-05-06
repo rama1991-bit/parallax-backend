@@ -92,7 +92,7 @@ curl -X POST http://localhost:8000/api/v1/compare \
 curl http://localhost:8000/api/v1/compare/<ingested_article_id>
 ```
 
-URL compare fetches, analyzes, and saves both articles for the current session, then returns claim overlap and framing divergence signals. Article-id compare uses persisted `ingested_articles` to find similar coverage across sources, returns the Phase 2 `base_article`, `similar_articles`, and structured `comparison` object, and persists lightweight `article_comparisons` rows for matching pairs. When model-backed analysis is enabled, the comparison object is provider-enhanced while preserving the same response shape and fallback behavior.
+URL compare fetches, analyzes, and saves both articles for the current session, then returns claim overlap and framing divergence signals. Article-id compare uses persisted `ingested_articles` to find similar coverage across sources, returns the Phase 2 `base_article`, `similar_articles`, title differences, missing and added claims, coverage gaps, entity overlap, and the structured `comparison` object, and persists lightweight `article_comparisons` rows for matching pairs. When model-backed analysis is enabled, the comparison object is provider-enhanced while preserving the same response shape and fallback behavior.
 
 Topic monitor flow:
 
@@ -275,7 +275,7 @@ Phase 2 implementation status:
 - Step 2 complete: `/api/v1/sources` source manager, source feed records, RSS/homepage sync, manual feed provenance, ingested article persistence, and `ingested_article` feed cards.
 - Step 3 complete: `POST /api/v1/analyze` accepts `ingested_article_id`, links analysis back to ingested articles, enriches existing source-ingested feed cards, and returns structured Phase 2 intelligence.
 - Step 4 complete: feed cards and article detail hydrate from persisted ingested-article analysis, including comparison hooks and node preview.
-- Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison, and persists `article_comparisons`.
+- Step 5 complete: `GET /api/v1/compare/{article_id}` finds similar ingested articles, returns structured cross-source comparison with title differences, missing/added claims, coverage gaps, source/timeline contrasts, and entity overlap, and persists `article_comparisons`.
 - Step 6 complete: article detail materializes `nodes` and `node_edges`, exposes node perspectives, and supports node-based detail tabs in the frontend.
 - Step 7 complete: `GET /api/v1/sources/articles/{article_id}/osint` returns bounded OSINT context and article detail includes `osint_context`.
 - Step 8 complete: `/api/v1/sources/defaults/preview`, `/api/v1/sources/defaults/seed`, and `scripts/seed_default_sources.py` provide an idempotent multilingual default source database.

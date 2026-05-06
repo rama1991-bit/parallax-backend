@@ -537,6 +537,11 @@ def main() -> int:
     assert article_compare["base_article"]["id"] == ingested_article_id, article_compare
     assert article_compare["similar_articles"], article_compare
     assert article_compare["comparison"]["confidence"] > 0, article_compare
+    assert "title_differences" in article_compare["comparison"], article_compare
+    assert "missing_claims" in article_compare["comparison"], article_compare
+    assert "added_claims" in article_compare["comparison"], article_compare
+    assert "coverage_gaps" in article_compare["comparison"], article_compare
+    assert "shared" in article_compare["entities"], article_compare
     assert article_compare["provider_metadata"]["status"] == "heuristic", article_compare
     assert store.ARTICLE_COMPARISONS, article_compare
 
