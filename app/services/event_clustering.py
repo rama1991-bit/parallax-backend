@@ -59,6 +59,131 @@ STOPWORDS = {
 }
 
 
+CROSS_LANGUAGE_PREFIX = "xlang_"
+CROSS_LANGUAGE_ALIASES = {
+    "grid": (
+        "electric grid",
+        "power grid",
+        "red electrica",
+        "\u0634\u0628\u06a9\u0647 \u0628\u0631\u0642",
+        "\u0634\u0628\u0643\u0629 \u0627\u0644\u0643\u0647\u0631\u0628\u0627\u0621",
+        "\u044d\u043b\u0435\u043a\u0442\u0440\u043e\u0441\u0435\u0442\u044c",
+    ),
+    "resilience": (
+        "resiliencia",
+        "resilience",
+        "\u062a\u0627\u0628 \u0622\u0648\u0631\u06cc",
+        "\u062a\u0627\u0628\u200c\u0622\u0648\u0631\u06cc",
+        "\u0645\u0631\u0648\u0646\u0629",
+        "\u0443\u0441\u0442\u043e\u0439\u0447\u0438\u0432\u043e\u0441\u0442\u044c",
+    ),
+    "regulator": (
+        "regulator",
+        "regulators",
+        "regulador",
+        "reguladores",
+        "autorite",
+        "autorites",
+        "\u0646\u0647\u0627\u062f \u0646\u0627\u0638\u0631",
+        "\u0646\u0647\u0627\u062f\u0647\u0627\u06cc \u0646\u0627\u0638\u0631",
+        "\u0627\u0644\u062c\u0647\u0627\u062a \u0627\u0644\u062a\u0646\u0638\u064a\u0645\u064a\u0629",
+    ),
+    "plan": (
+        "plan",
+        "programa",
+        "strategie",
+        "strategy",
+        "\u0637\u0631\u062d",
+        "\u0628\u0631\u0646\u0627\u0645\u0647",
+        "\u062e\u0637\u0629",
+        "\u043f\u043b\u0430\u043d",
+    ),
+    "ceasefire": (
+        "ceasefire",
+        "alto el fuego",
+        "alto fuego",
+        "cessez le feu",
+        "waffenruhe",
+        "\u0622\u062a\u0634 \u0628\u0633",
+        "\u0622\u062a\u0634\u200c\u0628\u0633",
+        "\u0648\u0642\u0641 \u0625\u0637\u0644\u0627\u0642 \u0627\u0644\u0646\u0627\u0631",
+        "\u043f\u0435\u0440\u0435\u043c\u0438\u0440\u0438\u0435",
+    ),
+    "sanctions": (
+        "sanction",
+        "sanctions",
+        "sanciones",
+        "\u062a\u062d\u0631\u06cc\u0645",
+        "\u062a\u062d\u0631\u06cc\u0645\u200c\u0647\u0627",
+        "\u0639\u0642\u0648\u0628\u0627\u062a",
+        "\u0441\u0430\u043d\u043a\u0446\u0438\u0438",
+    ),
+    "election": (
+        "election",
+        "elections",
+        "eleccion",
+        "elecciones",
+        "wahl",
+        "wahlen",
+        "\u0627\u0646\u062a\u062e\u0627\u0628\u0627\u062a",
+        "\u0627\u0646\u062a\u062e\u0627\u0628",
+        "\u0432\u044b\u0431\u043e\u0440\u044b",
+    ),
+    "attack": (
+        "attack",
+        "attacks",
+        "ataque",
+        "ataques",
+        "attaque",
+        "angriff",
+        "\u062d\u0645\u0644\u0647",
+        "\u0647\u062c\u0648\u0645",
+        "\u0430\u0442\u0430\u043a\u0430",
+    ),
+    "inflation": (
+        "inflation",
+        "inflacion",
+        "\u062a\u0648\u0631\u0645",
+        "\u062a\u0636\u062e\u0645",
+        "\u0438\u043d\u0444\u043b\u044f\u0446\u0438\u044f",
+    ),
+    "protest": (
+        "protest",
+        "protests",
+        "protesta",
+        "manifestation",
+        "demonstration",
+        "\u0627\u0639\u062a\u0631\u0627\u0636",
+        "\u0627\u062d\u062a\u062c\u0627\u062c",
+        "\u043f\u0440\u043e\u0442\u0435\u0441\u0442",
+    ),
+    "government": (
+        "government",
+        "govt",
+        "gobierno",
+        "gouvernement",
+        "regierung",
+        "\u062f\u0648\u0644\u062a",
+        "\u062d\u06a9\u0648\u0645\u062a",
+        "\u062d\u0643\u0648\u0645\u0629",
+        "\u043f\u0440\u0430\u0432\u0438\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e",
+    ),
+    "israel": ("israel", "\u0627\u0633\u0631\u0627\u0626\u06cc\u0644", "\u0625\u0633\u0631\u0627\u0626\u064a\u0644"),
+    "palestine": (
+        "palestine",
+        "palestinian",
+        "palestinians",
+        "\u0641\u0644\u0633\u0637\u06cc\u0646",
+        "\u0641\u0644\u0633\u0637\u064a\u0646",
+    ),
+    "ukraine": ("ukraine", "\u0627\u0648\u06a9\u0631\u0627\u06cc\u0646", "\u0623\u0648\u0643\u0631\u0627\u0646\u064a\u0627"),
+    "russia": ("russia", "russian", "\u0631\u0648\u0633\u06cc\u0647", "\u0631\u0648\u0633\u064a\u0627"),
+    "iran": ("iran", "iranian", "\u0627\u06cc\u0631\u0627\u0646", "\u0625\u064a\u0631\u0627\u0646"),
+    "gaza": ("gaza", "\u063a\u0632\u0647", "\u063a\u0632\u0629"),
+    "china": ("china", "chinese", "\u0686\u06cc\u0646", "\u0627\u0644\u0635\u064a\u0646"),
+}
+
+
 def _dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -85,6 +210,13 @@ def _normalize(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+CROSS_LANGUAGE_ALIAS_LOOKUP = {
+    _normalize(alias): canonical
+    for canonical, aliases in CROSS_LANGUAGE_ALIASES.items()
+    for alias in aliases
+}
+
+
 def _tokens(value: Any) -> list[str]:
     text = _normalize(value)
     tokens = []
@@ -95,6 +227,36 @@ def _tokens(value: Any) -> list[str]:
             continue
         tokens.append(token)
     return tokens
+
+
+def _display_term(term: str) -> str:
+    value = str(term or "")
+    if value.startswith(CROSS_LANGUAGE_PREFIX):
+        value = value.removeprefix(CROSS_LANGUAGE_PREFIX)
+    return value.replace("_", " ")
+
+
+def _semantic_terms(value: Any) -> set[str]:
+    text = _normalize(value)
+    raw_tokens = set(_tokens(value))
+    terms = set(raw_tokens)
+    if not text and not raw_tokens:
+        return terms
+
+    for alias, canonical in CROSS_LANGUAGE_ALIAS_LOOKUP.items():
+        if not alias:
+            continue
+        if " " in alias:
+            if alias in text:
+                terms.add(f"{CROSS_LANGUAGE_PREFIX}{canonical}")
+            continue
+        if alias in raw_tokens:
+            terms.add(f"{CROSS_LANGUAGE_PREFIX}{canonical}")
+    return terms
+
+
+def _bridge_terms(terms: set[str]) -> set[str]:
+    return {term for term in terms if str(term).startswith(CROSS_LANGUAGE_PREFIX)}
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -196,7 +358,7 @@ def _article_terms(article: dict) -> set[str]:
     ]
     terms: set[str] = set()
     for value in values:
-        terms.update(_tokens(value))
+        terms.update(_semantic_terms(value))
     return terms
 
 
@@ -220,19 +382,40 @@ def _date_key(article: dict) -> str:
     return str(article.get("published_at") or article.get("created_at") or "")
 
 
-def _similarity(article: dict, terms: set[str], cluster: dict) -> tuple[float, list[str]]:
+def _rank_matched_terms(terms: set[str], limit: int = 12) -> list[str]:
+    bridge = sorted(_display_term(term) for term in _bridge_terms(terms))
+    lexical = sorted(_display_term(term) for term in terms if term not in _bridge_terms(terms))
+    ordered = []
+    for value in [*bridge, *lexical]:
+        if value and value not in ordered:
+            ordered.append(value)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def _similarity(article: dict, terms: set[str], cluster: dict) -> tuple[float, list[str], dict]:
     cluster_terms = cluster.get("terms") or set()
     article_fingerprint = _article_fingerprint(article)
     if article_fingerprint and article_fingerprint in (cluster.get("fingerprints") or set()):
-        matched = sorted(list(terms & cluster_terms))[:12]
-        return 0.96, matched
+        overlap = terms & cluster_terms
+        matched = _rank_matched_terms(overlap or terms, limit=12)
+        return 0.96, matched, {
+            "match_strategy": "event_fingerprint",
+            "semantic_terms": _rank_matched_terms(_bridge_terms(overlap), limit=8),
+        }
     if not terms or not cluster_terms:
-        return 0.0, []
+        return 0.0, [], {"match_strategy": "no_terms", "semantic_terms": []}
     overlap = terms & cluster_terms
     union_score = len(overlap) / max(len(terms | cluster_terms), 1)
     coverage_score = len(overlap) / max(min(len(terms), len(cluster_terms)), 1)
-    score = union_score * 0.72 + coverage_score * 0.28
-    return round(score, 3), sorted(overlap)[:12]
+    bridge_overlap = _bridge_terms(overlap)
+    bridge_bonus = min(len(bridge_overlap) * 0.035, 0.14)
+    score = min(union_score * 0.64 + coverage_score * 0.26 + bridge_bonus, 1.0)
+    return round(score, 3), _rank_matched_terms(overlap, limit=12), {
+        "match_strategy": "cross_language_alias" if bridge_overlap else "lexical_overlap",
+        "semantic_terms": _rank_matched_terms(bridge_overlap, limit=8),
+    }
 
 
 def _cluster_key(terms: list[str], fingerprint: str | None = None) -> str:
@@ -282,6 +465,67 @@ def _article_excerpt(article: dict) -> dict:
     }
 
 
+def _cluster_provider_metadata(
+    *,
+    article_count: int,
+    analyzed_count: int,
+    source_count: int,
+    language_count: int,
+    country_count: int,
+    matches: dict,
+) -> dict:
+    match_scores = [
+        float(match.get("similarity_score") or 0.0)
+        for match in matches.values()
+    ]
+    average_similarity = round(sum(match_scores) / max(len(match_scores), 1), 3)
+    analysis_ratio = round(analyzed_count / max(article_count, 1), 3)
+    source_factor = min(source_count / 3, 1.0)
+    language_factor = min(language_count / 2, 1.0)
+    quality_score = round(
+        min(
+            average_similarity * 0.42
+            + analysis_ratio * 0.24
+            + source_factor * 0.22
+            + language_factor * 0.12,
+            1.0,
+        ),
+        3,
+    )
+    strategies = Counter(
+        match.get("match_strategy") or "unknown"
+        for match in matches.values()
+    )
+    bridge_terms = []
+    for match in matches.values():
+        bridge_terms.extend(match.get("semantic_terms") or [])
+
+    metadata = intelligence_provider.provider_metadata(
+        task="event_clustering",
+        status="heuristic",
+    )
+    metadata["cluster_quality"] = {
+        "quality_score": quality_score,
+        "average_similarity": average_similarity,
+        "analysis_ratio": analysis_ratio,
+        "match_count": len(matches),
+        "strategy_counts": dict(strategies),
+    }
+    metadata["source_diversity"] = {
+        "source_count": source_count,
+        "language_count": language_count,
+        "country_count": country_count,
+        "cross_language": language_count >= 2,
+        "cross_source": source_count >= 2,
+    }
+    metadata["language_bridge_terms"] = _top_values(bridge_terms, limit=10)
+    metadata["limitations"] = [
+        "Cross-language clustering uses bounded alias matching and article metadata; it is retrieval context, not translation.",
+        "High cluster quality means stronger retrieval evidence, not agreement or factual confirmation.",
+    ]
+    return metadata
+
+
 def _build_working_clusters(articles: list[dict]) -> list[dict]:
     working: list[dict] = []
     for article in sorted(articles, key=_date_key):
@@ -291,12 +535,14 @@ def _build_working_clusters(articles: list[dict]) -> list[dict]:
         best_cluster = None
         best_score = 0.0
         best_terms: list[str] = []
+        best_evidence: dict = {}
         for cluster in working:
-            score, matched = _similarity(article, terms, cluster)
+            score, matched, evidence = _similarity(article, terms, cluster)
             if score > best_score:
                 best_cluster = cluster
                 best_score = score
                 best_terms = matched
+                best_evidence = evidence
 
         if best_cluster and best_score >= 0.18:
             best_cluster["articles"].append(article)
@@ -304,6 +550,7 @@ def _build_working_clusters(articles: list[dict]) -> list[dict]:
             best_cluster["matches"][article["id"]] = {
                 "similarity_score": best_score,
                 "matched_terms": best_terms,
+                **best_evidence,
             }
             fingerprint = _article_fingerprint(article)
             if fingerprint:
@@ -319,7 +566,9 @@ def _build_working_clusters(articles: list[dict]) -> list[dict]:
                 "matches": {
                     article["id"]: {
                         "similarity_score": 1.0,
-                        "matched_terms": sorted(terms)[:12],
+                        "matched_terms": _rank_matched_terms(terms, limit=12),
+                        "match_strategy": "seed",
+                        "semantic_terms": _rank_matched_terms(_bridge_terms(terms), limit=8),
                     }
                 },
             }
@@ -364,6 +613,7 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
         term
         for term, _count in Counter(working["terms"]).most_common(18)
     ]
+    display_top_terms = list(dict.fromkeys(_display_term(term) for term in top_terms if term))[:18]
     fingerprints = sorted([value for value in working.get("fingerprints") or [] if value])
     cluster_key = _cluster_key(top_terms, fingerprints[0] if len(fingerprints) == 1 else None)
     cluster_id = str(uuid5(NAMESPACE_URL, f"parallax:{cluster_key}"))
@@ -372,8 +622,17 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
     latest_title = intelligence_provider.clean_text(latest_article.get("title"), limit=240, fallback="Untitled story")
     source_count = len(source_ids)
     language_count = len(languages)
+    country_count = len(countries)
     frame_values = _top_values(frames, limit=8)
     claim_values = _top_values(claims, limit=8)
+    provider_metadata = _cluster_provider_metadata(
+        article_count=article_count,
+        analyzed_count=analyzed_count,
+        source_count=source_count,
+        language_count=language_count,
+        country_count=country_count,
+        matches=working.get("matches") or {},
+    )
     summary = (
         f"{article_count} article{'s' if article_count != 1 else ''} across "
         f"{source_count} source{'s' if source_count != 1 else ''}"
@@ -398,13 +657,10 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
         "analyzed_count": analyzed_count,
         "first_seen_at": first_seen,
         "latest_seen_at": latest_seen,
-        "fingerprint_terms": top_terms,
+        "fingerprint_terms": display_top_terms,
         "claims": claim_values,
         "frames": frame_values,
-        "provider_metadata": intelligence_provider.provider_metadata(
-            task="event_clustering",
-            status="heuristic",
-        ),
+        "provider_metadata": provider_metadata,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "sample_articles": [_article_excerpt(article) for article in articles[:8]],
@@ -416,7 +672,8 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
     for article in articles:
         article_terms = _article_terms(article)
         match = working["matches"].get(article["id"]) or {}
-        matched_terms = sorted((article_terms & final_terms) or set(match.get("matched_terms") or []))[:12]
+        term_overlap = article_terms & final_terms
+        matched_terms = _rank_matched_terms(term_overlap, limit=12) if term_overlap else (match.get("matched_terms") or [])[:12]
         source = _article_source(article)
         memberships.append(
             {
@@ -476,6 +733,9 @@ def _build_cluster_feed_cards(
         article_count = int(cluster.get("article_count") or 0)
         source_count = len(cluster.get("source_ids") or [])
         language_count = len(cluster.get("languages") or [])
+        provider_metadata = cluster.get("provider_metadata") or {}
+        cluster_quality = provider_metadata.get("cluster_quality") or {}
+        source_diversity = provider_metadata.get("source_diversity") or {}
         href = f"/compare?articleId={base_article.get('id')}" if base_article.get("id") else "/compare"
         payload = {
             "event_cluster": True,
@@ -492,7 +752,10 @@ def _build_cluster_feed_cards(
             "claims": cluster.get("claims") or [],
             "frames": cluster.get("frames") or [],
             "sample_articles": sample_articles,
-            "provider_metadata": cluster.get("provider_metadata") or {},
+            "provider_metadata": provider_metadata,
+            "cluster_quality": cluster_quality,
+            "source_diversity": source_diversity,
+            "language_bridge_terms": provider_metadata.get("language_bridge_terms") or [],
         }
         if article_count >= 2:
             cards.append(
@@ -526,6 +789,7 @@ def _build_cluster_feed_cards(
                             "article_count": article_count,
                             "source_count": source_count,
                             "language_count": language_count,
+                            "quality_score": cluster_quality.get("quality_score"),
                         },
                         "recommended_action": "Use compare before treating repeated coverage as evidence.",
                     },
@@ -561,7 +825,10 @@ def _build_cluster_feed_cards(
                     ],
                     "explanation": {
                         "why_this_matters": "The same event has crossed language boundaries.",
-                        "what_changed": {"languages": cluster.get("languages") or []},
+                        "what_changed": {
+                            "languages": cluster.get("languages") or [],
+                            "language_bridge_terms": provider_metadata.get("language_bridge_terms") or [],
+                        },
                         "recommended_action": "Review framing by language and source type.",
                     },
                     "analysis": {"event_cluster": cluster},
@@ -699,11 +966,25 @@ def refresh_event_clusters(
 
     finished = datetime.now(timezone.utc)
     status = "completed" if not errors else "partial" if saved_clusters else "failed"
+    quality_scores = [
+        ((cluster.get("provider_metadata") or {}).get("cluster_quality") or {}).get("quality_score")
+        for cluster in saved_clusters
+    ]
+    quality_scores = [float(score) for score in quality_scores if score is not None]
+    cross_language_count = len(
+        [
+            cluster
+            for cluster in saved_clusters
+            if (((cluster.get("provider_metadata") or {}).get("source_diversity") or {}).get("cross_language"))
+        ]
+    )
     summary = {
         "cluster_count": len(saved_clusters),
         "article_count": len(articles),
         "card_count": len(saved_cards),
         "create_cards": create_cards,
+        "cross_language_cluster_count": cross_language_count,
+        "average_cluster_quality": round(sum(quality_scores) / max(len(quality_scores), 1), 3),
     }
     run = save_event_cluster_refresh_run(
         run_id=run_id,

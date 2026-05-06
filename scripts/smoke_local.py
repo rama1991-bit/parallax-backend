@@ -530,6 +530,38 @@ def main() -> int:
     )
     assert comparison_ingested["articles"], comparison_ingested
 
+    spanish_source = store.create_source_record(
+        name="LatAm Energia",
+        website_url="https://latam.example.com",
+        country="Mexico",
+        language="Spanish",
+        region="Latin America",
+        source_size="medium",
+        source_type="newspaper",
+    )
+    spanish_feed = store.create_source_feed_record(
+        source_id=spanish_source["id"],
+        feed_url="https://latam.example.com/rss.xml",
+        feed_type="rss",
+        title="LatAm Energia RSS",
+    )
+    spanish_ingested = store.save_ingested_articles(
+        spanish_source,
+        spanish_feed,
+        [
+            {
+                "external_id": "source-item-3",
+                "title": "Reguladores publican plan de resiliencia de la red electrica",
+                "summary": "El gobierno presenta un plan de resiliencia de la red electrica con controles de costos.",
+                "url": "https://latam.example.com/energia/resiliencia-red-electrica",
+                "published_at": "2026-05-02T12:00:00+00:00",
+                "raw": {"fixture": True, "language": "Spanish"},
+            }
+        ],
+        session_id=session_id,
+    )
+    assert spanish_ingested["articles"], spanish_ingested
+
     article_compare = _assert_ok(
         client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
         "compare/ingested-article",
@@ -647,6 +679,14 @@ def main() -> int:
     assert cluster_refresh["cluster_count"] >= 1, cluster_refresh
     assert cluster_refresh["article_count"] >= 2, cluster_refresh
     assert cluster_refresh["card_count"] >= 1, cluster_refresh
+    assert cluster_refresh["run"]["summary"]["cross_language_cluster_count"] >= 1, cluster_refresh
+    cross_language_clusters = [
+        cluster
+        for cluster in cluster_refresh["clusters"]
+        if ((cluster["provider_metadata"].get("source_diversity") or {}).get("cross_language"))
+    ]
+    assert cross_language_clusters, cluster_refresh
+    assert cross_language_clusters[0]["provider_metadata"]["language_bridge_terms"], cross_language_clusters
     assert store.EVENT_CLUSTERS and store.EVENT_CLUSTER_ARTICLES, cluster_refresh
     cluster_runs = _assert_ok(
         client.get("/api/v1/intelligence/clusters/runs", headers=admin_headers),
@@ -660,6 +700,7 @@ def main() -> int:
         "intelligence/clusters",
     ).json()
     assert clusters["items"], clusters
+    assert clusters["items"][0]["provider_metadata"]["cluster_quality"]["quality_score"] > 0, clusters
     topic_clusters = _assert_ok(
         client.get(f"/api/v1/intelligence/clusters?topic_id={energy_topic['id']}&limit=10", headers=headers),
         "intelligence/clusters-topic",
@@ -676,12 +717,13 @@ def main() -> int:
         "compare/ingested-article-clustered",
     ).json()
     assert clustered_compare["event_cluster"]["id"], clustered_compare
+    assert clustered_compare["event_cluster"]["cluster_quality"]["quality_score"] > 0, clustered_compare
     cluster_feed = _assert_ok(
         client.get("/api/v1/feed?filter_type=narrative&limit=30", headers=headers),
         "feed/event-cluster-cards",
     ).json()
     cluster_card_types = {item["card_type"] for item in cluster_feed["cards"]}
-    assert {"event_cluster", "cross_language_cluster", "source_divergence", "missing_coverage"} & cluster_card_types, cluster_feed
+    assert "cross_language_cluster" in cluster_card_types, cluster_feed
 
     pipeline_article = ExtractedArticle(
         url="https://example.com/pipeline-grid-resilience-follow-up",
@@ -1010,7 +1052,7 @@ def main() -> int:
     assert model_topic_intelligence["provider_metadata"]["status"] == "model", model_topic_intelligence
     assert "Provider-enhanced topic aggregation" in model_topic_intelligence["summary"], model_topic_intelligence
 
-    feed = _assert_ok(client.get("/api/v1/feed", headers=headers), "feed").json()
+    feed = _assert_ok(client.get("/api/v1/feed?limit=100", headers=headers), "feed").json()
     assert len(feed["cards"]) >= 5, feed
     ingested_feed_card = next(
         item

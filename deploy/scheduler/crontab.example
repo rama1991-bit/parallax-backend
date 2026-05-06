@@ -1,0 +1,7 @@
+# Parallax recurring intelligence pipeline.
+# Replace /app with the backend deploy directory.
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+*/30 * * * * cd /app && python scripts/run_intelligence_pipeline.py --source-limit 50 --feed-limit 100 --sync-article-limit 10 --sync-card-limit 25 --analysis-article-limit 25 --intelligence-source-limit 50 --topic-limit 50 --intelligence-article-limit 100 --intelligence-card-limit 50 --cluster-article-limit 250 --cluster-limit 100 --cluster-card-limit 50 >> /var/log/parallax-pipeline.log 2>&1

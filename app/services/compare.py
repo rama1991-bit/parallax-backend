@@ -446,6 +446,7 @@ def _article_summary(article: dict, similarity: dict | None = None) -> dict:
 def _cluster_summary(cluster: dict | None) -> dict | None:
     if not cluster:
         return None
+    metadata = cluster.get("provider_metadata") if isinstance(cluster.get("provider_metadata"), dict) else {}
     return {
         "id": cluster.get("id"),
         "cluster_key": cluster.get("cluster_key"),
@@ -463,6 +464,10 @@ def _cluster_summary(cluster: dict | None) -> dict | None:
         "claims": cluster.get("claims") or [],
         "frames": cluster.get("frames") or [],
         "membership": cluster.get("membership") or {},
+        "provider_metadata": metadata,
+        "cluster_quality": metadata.get("cluster_quality") or {},
+        "source_diversity": metadata.get("source_diversity") or {},
+        "language_bridge_terms": metadata.get("language_bridge_terms") or [],
         "limitations": [
             "The event cluster is a retrieval signal, not evidence that the articles agree.",
             "Cluster membership should be checked through claim, source, and timeline comparison.",

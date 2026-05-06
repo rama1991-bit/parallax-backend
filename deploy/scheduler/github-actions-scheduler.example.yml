@@ -1,0 +1,18 @@
+name: Parallax Scheduled Pipeline
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger backend pipeline
+        env:
+          PARALLAX_API_URL: ${{ secrets.PARALLAX_API_URL }}
+          PARALLAX_ADMIN_API_KEY: ${{ secrets.PARALLAX_ADMIN_API_KEY }}
+        run: |
+          curl -fsS -X POST "$PARALLAX_API_URL/api/v1/intelligence/pipeline/run?source_limit=50&feed_limit=100&sync_article_limit=10&sync_card_limit=25&analysis_article_limit=25&intelligence_source_limit=50&topic_limit=50&intelligence_article_limit=100&intelligence_card_limit=50&cluster_article_limit=250&cluster_limit=100&cluster_card_limit=50" \
+            -H "X-Parallax-Admin-Key: $PARALLAX_ADMIN_API_KEY"
