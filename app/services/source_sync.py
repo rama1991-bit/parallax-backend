@@ -13,6 +13,7 @@ from app.services.feed.store import (
     save_ingested_articles,
     update_source_feed_sync_result,
 )
+from app.services.homepage import HomepageSyncError, parse_homepage_feed
 from app.services.ops_notifications import safely_deliver_source_ops_alerts
 from app.services.rss import RSSSyncError, parse_rss_feed
 
@@ -58,8 +59,13 @@ def _skipped_source_result(source: dict, session_id: str, started_at: datetime, 
     summary = {
         "source_id": source.get("id"),
         "source_name": source.get("name"),
+        "feed_count": 0,
+        "syncable_feed_count": 0,
         "rss_feed_count": 0,
+        "homepage_feed_count": 0,
+        "manual_feed_count": 0,
         "synced_feed_count": 0,
+        "skipped_feed_count": 0,
         "article_count": 0,
         "card_count": 0,
         "error_count": 0,
@@ -87,13 +93,19 @@ def _skipped_source_result(source: dict, session_id: str, started_at: datetime, 
         "source": source,
         "status": "skipped",
         "skipped_reason": reason,
+        "feed_count": 0,
+        "syncable_feed_count": 0,
         "rss_feed_count": 0,
+        "homepage_feed_count": 0,
+        "manual_feed_count": 0,
         "synced_feed_count": 0,
+        "skipped_feed_count": 0,
         "article_count": 0,
         "card_count": 0,
         "articles": [],
         "cards": [],
         "synced_feeds": [],
+        "skipped_feeds": [],
         "errors": [],
         "limits": limits,
     }
@@ -136,16 +148,36 @@ async def sync_source_feeds(
     max_articles = _clamp(article_limit, default=20, minimum=1, maximum=50)
     max_cards = _clamp(card_limit, default=10, minimum=0, maximum=50)
     max_feeds = _clamp(feed_limit, default=25, minimum=1, maximum=100)
-    rss_feeds = list_source_feed_records(source_id=source_id, feed_type="rss", status="active")[:max_feeds]
+    active_feeds = list_source_feed_records(source_id=source_id, status="active")[:max_feeds]
+    syncable_feeds = [
+        feed
+        for feed in active_feeds
+        if feed.get("feed_type") in {"rss", "homepage"}
+    ]
+    manual_feeds = [feed for feed in active_feeds if feed.get("feed_type") == "manual"]
+    rss_feed_count = len([feed for feed in active_feeds if feed.get("feed_type") == "rss"])
+    homepage_feed_count = len([feed for feed in active_feeds if feed.get("feed_type") == "homepage"])
 
     articles = []
     cards = []
     errors = []
     synced_feeds = []
+    skipped_feeds = [
+        {
+            "feed_id": feed.get("id"),
+            "feed_url": feed.get("feed_url"),
+            "feed_type": feed.get("feed_type"),
+            "reason": "Manual source feeds are saved for provenance and are not fetched automatically.",
+        }
+        for feed in manual_feeds
+    ]
 
-    for feed in rss_feeds:
+    for feed in syncable_feeds:
         try:
-            parsed = await parse_rss_feed(feed["feed_url"], limit=max_articles)
+            if feed.get("feed_type") == "homepage":
+                parsed = await parse_homepage_feed(feed["feed_url"], limit=max_articles)
+            else:
+                parsed = await parse_rss_feed(feed["feed_url"], limit=max_articles)
             updated_feed = update_source_feed_sync_result(feed["id"], success=True, title=parsed.get("title"))
             saved = save_ingested_articles(
                 source,
@@ -160,6 +192,7 @@ async def sync_source_feeds(
                 {
                     "feed_id": feed["id"],
                     "feed_url": feed["feed_url"],
+                    "feed_type": feed.get("feed_type") or "rss",
                     "title": (updated_feed or feed).get("title") or parsed.get("title"),
                     "item_count": len(parsed.get("items") or []),
                     "article_count": len(saved["articles"]),
@@ -167,7 +200,7 @@ async def sync_source_feeds(
                     "last_success_at": (updated_feed or {}).get("last_success_at"),
                 }
             )
-        except RSSSyncError as exc:
+        except (HomepageSyncError, RSSSyncError) as exc:
             failed_feed = update_source_feed_sync_result(feed["id"], success=False, error=str(exc))
             errors.append(
                 {
@@ -175,12 +208,13 @@ async def sync_source_feeds(
                     "source_name": source.get("name"),
                     "feed_id": feed["id"],
                     "feed_url": feed["feed_url"],
+                    "feed_type": feed.get("feed_type") or "rss",
                     "error": str(exc),
                     "last_checked_at": (failed_feed or {}).get("last_checked_at"),
                 }
             )
 
-    status = _sync_status(len(rss_feeds), len(synced_feeds), len(errors))
+    status = _sync_status(len(syncable_feeds), len(synced_feeds), len(errors))
     limits = {
         "article_limit_per_feed": max_articles,
         "card_limit": max_cards,
@@ -189,8 +223,13 @@ async def sync_source_feeds(
     summary = {
         "source_id": source_id,
         "source_name": source.get("name"),
-        "rss_feed_count": len(rss_feeds),
+        "feed_count": len(active_feeds),
+        "syncable_feed_count": len(syncable_feeds),
+        "rss_feed_count": rss_feed_count,
+        "homepage_feed_count": homepage_feed_count,
+        "manual_feed_count": len(manual_feeds),
         "synced_feed_count": len(synced_feeds),
+        "skipped_feed_count": len(skipped_feeds),
         "article_count": len(articles),
         "card_count": len(cards),
         "error_count": len(errors),
@@ -204,7 +243,7 @@ async def sync_source_feeds(
         started_at=started_at,
         finished_at=datetime.now(timezone.utc),
         source_count=1,
-        feed_count=len(rss_feeds),
+        feed_count=len(active_feeds),
         synced_feed_count=len(synced_feeds),
         article_count=len(articles),
         card_count=len(cards),
@@ -217,13 +256,19 @@ async def sync_source_feeds(
     result = {
         "source": get_source_record(source_id) or source,
         "status": status,
-        "rss_feed_count": len(rss_feeds),
+        "feed_count": len(active_feeds),
+        "syncable_feed_count": len(syncable_feeds),
+        "rss_feed_count": rss_feed_count,
+        "homepage_feed_count": homepage_feed_count,
+        "manual_feed_count": len(manual_feeds),
         "synced_feed_count": len(synced_feeds),
+        "skipped_feed_count": len(skipped_feeds),
         "article_count": len(articles),
         "card_count": len(cards),
         "articles": articles,
         "cards": cards,
         "synced_feeds": synced_feeds,
+        "skipped_feeds": skipped_feeds,
         "errors": errors,
         "limits": limits,
     }
@@ -280,7 +325,7 @@ async def sync_active_source_feeds(
             feed_limit=remaining_feeds,
             deliver_ops_alerts=False,
         )
-        feed_count += result["rss_feed_count"]
+        feed_count += result.get("feed_count", result.get("rss_feed_count", 0))
         articles.extend(result["articles"])
         cards.extend(result["cards"])
         errors.extend(result["errors"])
@@ -288,8 +333,13 @@ async def sync_active_source_feeds(
             {
                 "source_id": source["id"],
                 "source_name": source.get("name"),
-                "rss_feed_count": result["rss_feed_count"],
+                "feed_count": result.get("feed_count", result.get("rss_feed_count", 0)),
+                "syncable_feed_count": result.get("syncable_feed_count", result.get("rss_feed_count", 0)),
+                "rss_feed_count": result.get("rss_feed_count", 0),
+                "homepage_feed_count": result.get("homepage_feed_count", 0),
+                "manual_feed_count": result.get("manual_feed_count", 0),
                 "synced_feed_count": result["synced_feed_count"],
+                "skipped_feed_count": result.get("skipped_feed_count", 0),
                 "article_count": result["article_count"],
                 "card_count": result["card_count"],
                 "error_count": len(result["errors"]),
@@ -298,7 +348,8 @@ async def sync_active_source_feeds(
             }
         )
 
-    status = _sync_status(feed_count, sum(item["synced_feed_count"] for item in source_results), len(errors))
+    syncable_feed_count = sum(item.get("syncable_feed_count", item.get("rss_feed_count", 0)) for item in source_results)
+    status = _sync_status(syncable_feed_count, sum(item["synced_feed_count"] for item in source_results), len(errors))
     limits = {
         "source_limit": max_sources,
         "feed_limit": max_feeds,
@@ -308,7 +359,9 @@ async def sync_active_source_feeds(
     summary = {
         "source_count": len(source_results),
         "feed_count": feed_count,
+        "syncable_feed_count": syncable_feed_count,
         "synced_feed_count": sum(item["synced_feed_count"] for item in source_results),
+        "skipped_feed_count": sum(item.get("skipped_feed_count", 0) for item in source_results),
         "article_count": len(articles),
         "card_count": len(cards),
         "error_count": len(errors),
@@ -334,7 +387,9 @@ async def sync_active_source_feeds(
         "status": status,
         "source_count": len(source_results),
         "feed_count": feed_count,
+        "syncable_feed_count": summary["syncable_feed_count"],
         "synced_feed_count": summary["synced_feed_count"],
+        "skipped_feed_count": summary["skipped_feed_count"],
         "article_count": len(articles),
         "card_count": len(cards),
         "error_count": len(errors),

@@ -60,6 +60,8 @@ async def run_intelligence_pipeline(
                     "run_id": sync_result.get("sync_run_id"),
                     "source_count": sync_result.get("source_count", 0),
                     "feed_count": sync_result.get("feed_count", 0),
+                    "syncable_feed_count": sync_result.get("syncable_feed_count", 0),
+                    "skipped_feed_count": sync_result.get("skipped_feed_count", 0),
                     "article_count": sync_result.get("article_count", 0),
                     "card_count": sync_result.get("card_count", 0),
                     "error_count": sync_result.get("error_count", 0),

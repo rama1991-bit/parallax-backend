@@ -150,12 +150,39 @@ def main() -> int:
     denied_source_sync = client.post(f"/api/v1/sources/{source['id']}/sync", headers=headers)
     assert denied_source_sync.status_code == 403, denied_source_sync.text
 
-    source_sync = _assert_ok(
-        client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
-        "sources/sync-no-rss",
-    ).json()
+    original_parse_homepage_feed = source_sync_service.parse_homepage_feed
+
+    async def fake_parse_homepage_feed(url: str, limit: int = 20):
+        return {
+            "url": url,
+            "title": "Example Daily Homepage",
+            "description": "Fixture homepage discovery.",
+            "items": [
+                {
+                    "external_id": "homepage-item-1",
+                    "title": "Homepage highlights grid resilience preview",
+                    "summary": "A homepage-discovered story previews grid resilience coverage.",
+                    "url": "https://example.com/homepage-grid-resilience-preview",
+                    "published_at": "2026-05-02T08:00:00+00:00",
+                    "raw": {"fixture": True, "discovery_method": "homepage_link_heuristic"},
+                }
+            ],
+        }
+
+    try:
+        source_sync_service.parse_homepage_feed = fake_parse_homepage_feed
+        source_sync = _assert_ok(
+            client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
+            "sources/sync-homepage",
+        ).json()
+    finally:
+        source_sync_service.parse_homepage_feed = original_parse_homepage_feed
+
+    assert source_sync["feed_count"] == 1, source_sync
     assert source_sync["rss_feed_count"] == 0, source_sync
-    assert source_sync["status"] == "skipped", source_sync
+    assert source_sync["homepage_feed_count"] == 1, source_sync
+    assert source_sync["article_count"] == 1, source_sync
+    assert source_sync["status"] == "completed", source_sync
     assert source_sync["sync_run_id"], source_sync
 
     default_preview = _assert_ok(client.get("/api/v1/sources/defaults/preview"), "sources/defaults-preview").json()
@@ -233,11 +260,19 @@ def main() -> int:
         "sources/feed-quarantine",
     ).json()["feed"]
     assert quarantined_feed["status"] == "quarantined", quarantined_feed
-    quarantined_sync = _assert_ok(
-        client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
-        "sources/sync-quarantined-feed",
-    ).json()
-    assert quarantined_sync["status"] == "skipped", quarantined_sync
+    original_parse_homepage_feed_quarantine = source_sync_service.parse_homepage_feed
+    try:
+        source_sync_service.parse_homepage_feed = fake_parse_homepage_feed
+        quarantined_sync = _assert_ok(
+            client.post(f"/api/v1/sources/{source['id']}/sync", headers=admin_headers),
+            "sources/sync-quarantined-feed",
+        ).json()
+    finally:
+        source_sync_service.parse_homepage_feed = original_parse_homepage_feed_quarantine
+
+    assert quarantined_sync["status"] == "completed", quarantined_sync
+    assert quarantined_sync["feed_count"] == 1, quarantined_sync
+    assert quarantined_sync["homepage_feed_count"] == 1, quarantined_sync
     assert quarantined_sync["rss_feed_count"] == 0, quarantined_sync
     assert quarantined_sync["ops_alerts"]["generated_alert_count"] >= 1, quarantined_sync
     reactivated_feed = _assert_ok(
@@ -358,6 +393,7 @@ def main() -> int:
     assert acknowledged_ops_alert["status"] == "acknowledged", acknowledged_ops_alert
 
     original_parse_rss_feed = source_sync_service.parse_rss_feed
+    original_parse_homepage_feed_scheduler = source_sync_service.parse_homepage_feed
     previous_ops_enabled_scheduler = ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED
     previous_ops_url_scheduler = ops_notification_service.settings.OPS_WEBHOOK_URL
     previous_ops_secret_scheduler = ops_notification_service.settings.OPS_WEBHOOK_SECRET
@@ -387,6 +423,7 @@ def main() -> int:
 
     try:
         source_sync_service.parse_rss_feed = fake_parse_rss_feed
+        source_sync_service.parse_homepage_feed = fake_parse_homepage_feed
         ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = True
         ops_notification_service.settings.OPS_WEBHOOK_URL = "https://hooks.example.test/parallax"
         ops_notification_service.settings.OPS_WEBHOOK_SECRET = "smoke-webhook-secret"
@@ -409,6 +446,7 @@ def main() -> int:
         ).json()
     finally:
         source_sync_service.parse_rss_feed = original_parse_rss_feed
+        source_sync_service.parse_homepage_feed = original_parse_homepage_feed_scheduler
         ops_notification_service.settings.OPS_NOTIFICATIONS_ENABLED = previous_ops_enabled_scheduler
         ops_notification_service.settings.OPS_WEBHOOK_URL = previous_ops_url_scheduler
         ops_notification_service.settings.OPS_WEBHOOK_SECRET = previous_ops_secret_scheduler
@@ -618,6 +656,7 @@ def main() -> int:
     assert {"event_cluster", "cross_language_cluster", "source_divergence", "missing_coverage"} & cluster_card_types, cluster_feed
 
     original_pipeline_parse_rss_feed = source_sync_service.parse_rss_feed
+    original_pipeline_parse_homepage_feed = source_sync_service.parse_homepage_feed
 
     async def fake_pipeline_parse_rss_feed(url: str, limit: int = 20):
         return {
@@ -638,6 +677,7 @@ def main() -> int:
 
     try:
         source_sync_service.parse_rss_feed = fake_pipeline_parse_rss_feed
+        source_sync_service.parse_homepage_feed = fake_parse_homepage_feed
         pipeline = _assert_ok(
             client.post(
                 "/api/v1/intelligence/pipeline/run?source_limit=2&feed_limit=2&sync_article_limit=1&sync_card_limit=2&intelligence_source_limit=2&topic_limit=2&intelligence_article_limit=20&intelligence_card_limit=4&cluster_article_limit=50&cluster_limit=20&cluster_card_limit=6",
@@ -647,6 +687,7 @@ def main() -> int:
         ).json()
     finally:
         source_sync_service.parse_rss_feed = original_pipeline_parse_rss_feed
+        source_sync_service.parse_homepage_feed = original_pipeline_parse_homepage_feed
 
     assert pipeline["pipeline_id"], pipeline
     assert pipeline["status"] in {"completed", "partial"}, pipeline
@@ -963,7 +1004,7 @@ def main() -> int:
     assert source_record["review_status"] == "reviewed", source_record
     assert source_record["quality_score"] >= 0, source_record
     source_detail = _assert_ok(client.get(f"/api/v1/sources/{source['id']}"), "sources/detail").json()
-    assert source_detail["source"]["article_count"] == 1, source_detail
+    assert source_detail["source"]["article_count"] >= 2, source_detail
     assert source_detail["health"]["status"] == "healthy", source_detail
     assert source_detail["quality"]["quality_score"] >= 0.55, source_detail
     assert source_detail["sync_runs"], source_detail
@@ -973,8 +1014,9 @@ def main() -> int:
         client.get(f"/api/v1/sources/{source['id']}/articles"),
         "sources/articles",
     ).json()["articles"]
-    assert source_articles and source_articles[0]["id"] == ingested_article_id, source_articles
-    assert source_articles[0]["analysis_status"] == "analyzed", source_articles
+    assert source_articles and any(article["id"] == ingested_article_id for article in source_articles), source_articles
+    analyzed_source_article = next(article for article in source_articles if article["id"] == ingested_article_id)
+    assert analyzed_source_article["analysis_status"] == "analyzed", source_articles
     article_detail_payload = _assert_ok(
         client.get(f"/api/v1/sources/articles/{ingested_article_id}", headers=headers),
         "sources/article-detail",
@@ -1047,6 +1089,33 @@ def main() -> int:
     assert len(topics["topics"]) == 2, topics
     feeds = _assert_ok(client.get("/api/v1/feeds", headers=headers), "feeds").json()
     assert len(feeds["feeds"]) == 1, feeds
+
+    manual_source_payload = _assert_ok(
+        client.post(
+            "/api/v1/sources",
+            json={
+                "name": "Manual Desk",
+                "website_url": "https://manual.example.com",
+                "country": "Germany",
+                "language": "English",
+                "source_type": "independent",
+                "feed_type": "manual",
+            },
+        ),
+        "sources/create-manual",
+    ).json()
+    manual_source = manual_source_payload["source"]
+    assert manual_source_payload["feed"]["feed_type"] == "manual", manual_source_payload
+    manual_sync = _assert_ok(
+        client.post(f"/api/v1/sources/{manual_source['id']}/sync", headers=admin_headers),
+        "sources/sync-manual",
+    ).json()
+    assert manual_sync["status"] == "skipped", manual_sync
+    assert manual_sync["feed_count"] == 1, manual_sync
+    assert manual_sync["syncable_feed_count"] == 0, manual_sync
+    assert manual_sync["manual_feed_count"] == 1, manual_sync
+    assert manual_sync["skipped_feed_count"] == 1, manual_sync
+    assert manual_sync["skipped_feeds"][0]["feed_type"] == "manual", manual_sync
 
     print(
         "smoke passed",
