@@ -57,6 +57,9 @@ def _reset_memory_store() -> None:
         store.EVENT_CLUSTER_ARTICLES,
         store.EVENT_CLUSTER_REFRESH_RUNS,
         store.SOURCE_DRAFT_RESOLUTIONS,
+        store.SOURCE_DISCOVERY_RUNS,
+        store.SOURCE_CANDIDATE_VALIDATION_RUNS,
+        store.SOURCE_ONBOARDING_RUNS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -759,6 +762,14 @@ def main() -> int:
     assert discovered_sources["candidates"], discovered_sources
     assert discovered_sources["candidates"][0]["create_payload"]["website_url"], discovered_sources
     assert discovered_sources["retrieval_mode"]["external_requested"], discovered_sources
+    assert discovered_sources["discovery_run"]["candidate_count"] >= 1, discovered_sources
+    discovery_runs = _assert_ok(
+        client.get("/api/v1/sources/discovery-runs?limit=5", headers=admin_headers),
+        "sources/discovery-runs",
+    ).json()
+    assert discovery_runs["summary"]["run_count"] >= 1, discovery_runs
+    denied_discovery_runs = client.get("/api/v1/sources/discovery-runs", headers=headers)
+    assert denied_discovery_runs.status_code == 403, denied_discovery_runs.text
     validation_candidate = {
         **discovered_sources["candidates"][0],
         "rss_url": "https://discovery.example.com/rss.xml",
@@ -809,6 +820,65 @@ def main() -> int:
     assert validated_source["validation"]["status"] == "validated", validated_source
     assert validated_source["candidate"]["validation_status"] == "validated", validated_source
     assert validated_source["candidate"]["create_payload"]["rss_url"], validated_source
+    assert validated_source["validation_run"]["status"] == "validated", validated_source
+    validation_runs = _assert_ok(
+        client.get("/api/v1/sources/validation-runs?limit=5", headers=admin_headers),
+        "sources/validation-runs",
+    ).json()
+    assert validation_runs["summary"]["run_count"] >= 1, validation_runs
+    denied_onboarding = client.post(
+        "/api/v1/sources/discover/onboard",
+        json={"candidate": validated_source["candidate"]},
+        headers=headers,
+    )
+    assert denied_onboarding.status_code == 403, denied_onboarding.text
+    original_onboarding_parse_rss = source_discovery_service.parse_rss_feed
+    original_sync_parse_rss_onboarding = source_sync_service.parse_rss_feed
+    original_onboarding_parse_homepage = source_discovery_service.parse_homepage_feed
+    try:
+        source_discovery_service.parse_rss_feed = fake_discovery_parse_rss
+        source_discovery_service.parse_homepage_feed = fake_discovery_parse_homepage
+        source_sync_service.parse_rss_feed = fake_parse_rss_feed
+        onboarded_source = _assert_ok(
+            client.post(
+                "/api/v1/sources/discover/onboard?sync_article_limit=2&sync_card_limit=2&analysis_article_limit=2&cluster_article_limit=100&cluster_limit=50&cluster_card_limit=10",
+                json={
+                    "candidate": {
+                        **validated_source["candidate"],
+                        "name": "Discovery Fixture Wire",
+                        "website_url": "https://discovery.example.com",
+                        "rss_url": "https://discovery.example.com/rss.xml",
+                    },
+                    "source_payload": {
+                        "name": "Discovery Fixture Wire",
+                        "country": "United States",
+                        "language": "English",
+                        "source_size": "small",
+                        "source_type": "independent",
+                        "credibility_notes": "Smoke-tested validated discovery source.",
+                    },
+                    "sync_after_create": True,
+                    "analyze_after_sync": True,
+                    "refresh_intelligence": True,
+                    "refresh_clusters": False,
+                },
+                headers=admin_headers,
+            ),
+            "sources/discover-onboard",
+        ).json()
+    finally:
+        source_discovery_service.parse_rss_feed = original_onboarding_parse_rss
+        source_discovery_service.parse_homepage_feed = original_onboarding_parse_homepage
+        source_sync_service.parse_rss_feed = original_sync_parse_rss_onboarding
+    assert onboarded_source["source"]["name"] == "Discovery Fixture Wire", onboarded_source
+    assert onboarded_source["summary"]["coverage_delta"]["synced_articles"] >= 1, onboarded_source
+    assert any(phase["name"] == "source_sync" for phase in onboarded_source["phases"]), onboarded_source
+    onboarding_runs = _assert_ok(
+        client.get("/api/v1/sources/onboarding-runs?limit=5", headers=admin_headers),
+        "sources/onboarding-runs",
+    ).json()
+    assert onboarding_runs["summary"]["run_count"] >= 1, onboarding_runs
+    assert onboarding_runs["runs"][0]["summary"]["source_created"] is True, onboarding_runs
     denied_draft_resolution = client.post(
         f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
         json={"status": "ignored", "resolution_notes": "public request should fail"},

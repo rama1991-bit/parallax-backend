@@ -6,8 +6,14 @@ import re
 from urllib.parse import urlparse, urlunparse
 
 from app.core.config import settings
+from app.core.session import ANONYMOUS_SESSION_ID
 from app.services.default_sources import DEFAULT_NEWS_SOURCES
-from app.services.feed.store import list_source_records
+from app.services.feed.store import (
+    FeedStoreError,
+    list_source_records,
+    save_source_candidate_validation_run,
+    save_source_discovery_run,
+)
 from app.services.homepage import HomepageSyncError, parse_homepage_feed
 from app.services.intelligence import provider_metadata
 from app.services.osint import OSINTContextError, fetch_public_search_results
@@ -102,6 +108,20 @@ def _source_payload(candidate: dict) -> dict:
 def _with_source_payload(candidate: dict) -> dict:
     candidate["create_payload"] = _source_payload(candidate)
     return candidate
+
+
+def _safe_save_discovery_run(**kwargs) -> dict | None:
+    try:
+        return save_source_discovery_run(**kwargs)
+    except FeedStoreError:
+        return None
+
+
+def _safe_save_validation_run(**kwargs) -> dict | None:
+    try:
+        return save_source_candidate_validation_run(**kwargs)
+    except FeedStoreError:
+        return None
 
 
 def _candidate_id(*parts: object) -> str:
@@ -251,6 +271,7 @@ def _dedupe_candidates(candidates: list[dict], limit: int) -> list[dict]:
 async def discover_source_candidates(
     *,
     query: str,
+    session_id: str = ANONYMOUS_SESSION_ID,
     cluster_id: str | None = None,
     candidate_id: str | None = None,
     country: str | None = None,
@@ -287,7 +308,7 @@ async def discover_source_candidates(
     web_candidates = _search_result_candidates(external_results, hints, limit=limit, existing_by_domain=existing_by_domain)
     candidates = _dedupe_candidates([*web_candidates, *default_candidates], limit=limit)
 
-    return {
+    result = {
         "query": clean_query,
         "cluster_id": cluster_id,
         "candidate_id": candidate_id,
@@ -313,6 +334,23 @@ async def discover_source_candidates(
         ],
         "provider_metadata": provider_metadata(task="source_discovery", status="heuristic"),
     }
+    discovery_run = _safe_save_discovery_run(
+        session_id=session_id,
+        query=clean_query,
+        cluster_id=cluster_id,
+        candidate_id=candidate_id,
+        include_external=include_external,
+        status="partial" if errors else "completed",
+        candidate_count=len(candidates),
+        existing_source_match_count=result["summary"]["existing_source_match_count"],
+        request_payload={"hints": hints, "limit": limit},
+        response_payload={key: value for key, value in result.items() if key != "discovery_run"},
+        retrieval_mode=result["retrieval_mode"],
+        provider_metadata=result["provider_metadata"],
+    )
+    if discovery_run:
+        result["discovery_run"] = discovery_run
+    return result
 
 
 def _candidate_url_list(candidate: dict, key: str) -> list[str]:
@@ -363,9 +401,35 @@ def _candidate_with_validation(candidate: dict, validation: dict) -> dict:
     return _with_source_payload(enriched)
 
 
+def _validation_response(candidate: dict, validation: dict, session_id: str) -> dict:
+    candidate_payload = _candidate_with_validation(candidate, validation)
+    metadata = provider_metadata(task="source_candidate_validation", status="heuristic")
+    result = {
+        "candidate": candidate_payload,
+        "validation": validation,
+        "provider_metadata": metadata,
+    }
+    validation_run = _safe_save_validation_run(
+        session_id=session_id,
+        candidate_id=candidate_payload.get("id"),
+        source_id=candidate_payload.get("existing_source_id"),
+        status=validation.get("status") or "failed",
+        selected_feed_type=validation.get("selected_feed_type"),
+        selected_feed_url=validation.get("selected_feed_url"),
+        item_count=validation.get("item_count") or 0,
+        candidate_payload=candidate_payload,
+        validation_payload=validation,
+        provider_metadata=metadata,
+    )
+    if validation_run:
+        result["validation_run"] = validation_run
+    return result
+
+
 async def validate_source_candidate(
     *,
     candidate: dict,
+    session_id: str = ANONYMOUS_SESSION_ID,
     allow_homepage_fallback: bool = True,
     limit: int = 5,
 ) -> dict:
@@ -390,11 +454,7 @@ async def validate_source_candidate(
                         "Validation confirms the feed is readable now; it does not validate editorial credibility or future availability.",
                     ],
                 }
-                return {
-                    "candidate": _candidate_with_validation(candidate, validation),
-                    "validation": validation,
-                    "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
-                }
+                return _validation_response(candidate, validation, session_id)
         except RSSSyncError as exc:
             attempts.append(_validation_attempt("rss", rss_url, "failed", error=str(exc)))
 
@@ -418,11 +478,7 @@ async def validate_source_candidate(
                         "Validation does not assess editorial reliability.",
                     ],
                 }
-                return {
-                    "candidate": _candidate_with_validation(candidate, validation),
-                    "validation": validation,
-                    "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
-                }
+                return _validation_response(candidate, validation, session_id)
             except HomepageSyncError as exc:
                 attempts.append(_validation_attempt("homepage", website_url, "failed", error=str(exc)))
 
@@ -440,8 +496,4 @@ async def validate_source_candidate(
             "Use admin override only after manual source review.",
         ],
     }
-    return {
-        "candidate": _candidate_with_validation(candidate, validation),
-        "validation": validation,
-        "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
-    }
+    return _validation_response(candidate, validation, session_id)

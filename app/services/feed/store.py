@@ -44,6 +44,9 @@ EVENT_CLUSTERS = []
 EVENT_CLUSTER_ARTICLES = []
 EVENT_CLUSTER_REFRESH_RUNS = []
 SOURCE_DRAFT_RESOLUTIONS = []
+SOURCE_DISCOVERY_RUNS = []
+SOURCE_CANDIDATE_VALIDATION_RUNS = []
+SOURCE_ONBOARDING_RUNS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -87,6 +90,8 @@ _SOURCE_OPS_ALERT_SEVERITIES = {"info", "warning", "critical"}
 _SOURCE_OPS_ALERT_STATUSES = {"active", "acknowledged", "resolved"}
 _SOURCE_OPS_DELIVERY_STATUSES = {"delivered", "failed", "skipped"}
 _SOURCE_DRAFT_RESOLUTION_STATUSES = {"draft", "created", "resolved", "ignored"}
+_SOURCE_CANDIDATE_VALIDATION_STATUSES = {"validated", "needs_review", "failed"}
+_SOURCE_WORKFLOW_STATUSES = {"completed", "partial", "failed", "skipped"}
 
 
 def now_iso():
@@ -882,6 +887,67 @@ def _ensure_schema():
                     );
                     """,
                     """
+                    create table if not exists public.source_discovery_runs (
+                        id uuid primary key,
+                        session_id text,
+                        query text not null,
+                        cluster_id uuid,
+                        candidate_id text,
+                        include_external boolean not null default false,
+                        status text not null default 'completed' check (
+                            status in ('completed', 'partial', 'failed', 'skipped')
+                        ),
+                        candidate_count integer not null default 0,
+                        existing_source_match_count integer not null default 0,
+                        request_payload jsonb not null default '{}'::jsonb,
+                        response_payload jsonb not null default '{}'::jsonb,
+                        retrieval_mode jsonb not null default '{}'::jsonb,
+                        provider_metadata jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create table if not exists public.source_candidate_validation_runs (
+                        id uuid primary key,
+                        session_id text,
+                        candidate_id text,
+                        source_id uuid references public.sources(id) on delete set null,
+                        status text not null default 'failed' check (
+                            status in ('validated', 'needs_review', 'failed')
+                        ),
+                        selected_feed_type text,
+                        selected_feed_url text,
+                        item_count integer not null default 0,
+                        candidate_payload jsonb not null default '{}'::jsonb,
+                        validation_payload jsonb not null default '{}'::jsonb,
+                        provider_metadata jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
+                    create table if not exists public.source_onboarding_runs (
+                        id uuid primary key,
+                        session_id text,
+                        status text not null default 'completed' check (
+                            status in ('completed', 'partial', 'failed', 'skipped')
+                        ),
+                        source_id uuid references public.sources(id) on delete set null,
+                        source_feed_id uuid references public.source_feeds(id) on delete set null,
+                        cluster_id uuid,
+                        candidate_id text,
+                        source_name text,
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        phases jsonb not null default '[]'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        request_payload jsonb not null default '{}'::jsonb,
+                        result_payload jsonb not null default '{}'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
                     create index if not exists idx_event_clusters_latest
                     on public.event_clusters (latest_seen_at desc, article_count desc);
                     """,
@@ -913,6 +979,38 @@ def _ensure_schema():
                     create index if not exists idx_source_draft_resolutions_source
                     on public.source_draft_resolutions (source_id, updated_at desc)
                     where source_id is not null;
+                    """,
+                    """
+                    create index if not exists idx_source_discovery_runs_created
+                    on public.source_discovery_runs (created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_discovery_runs_cluster
+                    on public.source_discovery_runs (cluster_id, created_at desc)
+                    where cluster_id is not null;
+                    """,
+                    """
+                    create index if not exists idx_source_candidate_validation_runs_created
+                    on public.source_candidate_validation_runs (created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_candidate_validation_runs_candidate
+                    on public.source_candidate_validation_runs (candidate_id, created_at desc)
+                    where candidate_id is not null;
+                    """,
+                    """
+                    create index if not exists idx_source_onboarding_runs_created
+                    on public.source_onboarding_runs (created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_onboarding_runs_source
+                    on public.source_onboarding_runs (source_id, created_at desc)
+                    where source_id is not null;
+                    """,
+                    """
+                    create index if not exists idx_source_onboarding_runs_cluster
+                    on public.source_onboarding_runs (cluster_id, created_at desc)
+                    where cluster_id is not null;
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -4236,6 +4334,459 @@ def list_source_draft_resolutions(cluster_id: str, limit: int = 100) -> list[dic
                 return [_row_to_source_draft_resolution(row) for row in cur.fetchall()]
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not list source draft resolutions: {exc}") from exc
+
+
+def _normalize_workflow_status(status: str | None) -> str:
+    clean_status = _clean_text(status, 20) or "completed"
+    return clean_status if clean_status in _SOURCE_WORKFLOW_STATUSES else "completed"
+
+
+def _normalize_candidate_validation_status(status: str | None) -> str:
+    clean_status = _clean_text(status, 20) or "failed"
+    return clean_status if clean_status in _SOURCE_CANDIDATE_VALIDATION_STATUSES else "failed"
+
+
+def _row_to_source_discovery_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "query": row.get("query") or "",
+        "cluster_id": str(row.get("cluster_id")) if row.get("cluster_id") else None,
+        "candidate_id": row.get("candidate_id"),
+        "include_external": bool(row.get("include_external")),
+        "status": row.get("status") or "completed",
+        "candidate_count": int(row.get("candidate_count") or 0),
+        "existing_source_match_count": int(row.get("existing_source_match_count") or 0),
+        "request_payload": row.get("request_payload") or {},
+        "response_payload": row.get("response_payload") or {},
+        "retrieval_mode": row.get("retrieval_mode") or {},
+        "provider_metadata": row.get("provider_metadata") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_source_discovery_run(
+    *,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    query: str,
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    include_external: bool = False,
+    status: str = "completed",
+    candidate_count: int = 0,
+    existing_source_match_count: int = 0,
+    request_payload: dict | None = None,
+    response_payload: dict | None = None,
+    retrieval_mode: dict | None = None,
+    provider_metadata: dict | None = None,
+) -> dict:
+    run = {
+        "id": str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "query": _clean_text(query, 500) or "",
+        "cluster_id": _clean_text(cluster_id, 80),
+        "candidate_id": _clean_text(candidate_id, 120),
+        "include_external": bool(include_external),
+        "status": _normalize_workflow_status(status),
+        "candidate_count": max(0, int(candidate_count or 0)),
+        "existing_source_match_count": max(0, int(existing_source_match_count or 0)),
+        "request_payload": request_payload or {},
+        "response_payload": response_payload or {},
+        "retrieval_mode": retrieval_mode or {},
+        "provider_metadata": provider_metadata or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        SOURCE_DISCOVERY_RUNS.insert(0, run)
+        return dict(run)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_discovery_runs (
+                        id, session_id, query, cluster_id, candidate_id, include_external,
+                        status, candidate_count, existing_source_match_count, request_payload,
+                        response_payload, retrieval_mode, provider_metadata, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["query"],
+                        run["cluster_id"],
+                        run["candidate_id"],
+                        run["include_external"],
+                        run["status"],
+                        run["candidate_count"],
+                        run["existing_source_match_count"],
+                        Json(run["request_payload"]),
+                        Json(run["response_payload"]),
+                        Json(run["retrieval_mode"]),
+                        Json(run["provider_metadata"]),
+                    ),
+                )
+                return _row_to_source_discovery_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source discovery run: {exc}") from exc
+
+
+def list_source_discovery_runs(
+    *,
+    session_id: str | None = None,
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+    clean_cluster_id = _clean_text(cluster_id, 80)
+    clean_candidate_id = _clean_text(candidate_id, 120)
+
+    def matches(run: dict) -> bool:
+        return (
+            (not clean_session_id or run.get("session_id") == clean_session_id)
+            and (not clean_cluster_id or run.get("cluster_id") == clean_cluster_id)
+            and (not clean_candidate_id or run.get("candidate_id") == clean_candidate_id)
+        )
+
+    if not database_enabled():
+        runs = [dict(run) for run in SOURCE_DISCOVERY_RUNS if matches(run)]
+        return sorted(runs, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_session_id:
+        where.append("session_id = %s")
+        params.append(clean_session_id)
+    if clean_cluster_id:
+        where.append("cluster_id::text = %s")
+        params.append(clean_cluster_id)
+    if clean_candidate_id:
+        where.append("candidate_id = %s")
+        params.append(clean_candidate_id)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_discovery_runs
+                    {where_sql}
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_discovery_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source discovery runs: {exc}") from exc
+
+
+def _row_to_source_candidate_validation_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "candidate_id": row.get("candidate_id"),
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "status": row.get("status") or "failed",
+        "selected_feed_type": row.get("selected_feed_type"),
+        "selected_feed_url": row.get("selected_feed_url"),
+        "item_count": int(row.get("item_count") or 0),
+        "candidate_payload": row.get("candidate_payload") or {},
+        "validation_payload": row.get("validation_payload") or {},
+        "provider_metadata": row.get("provider_metadata") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_source_candidate_validation_run(
+    *,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    candidate_id: str | None = None,
+    source_id: str | None = None,
+    status: str = "failed",
+    selected_feed_type: str | None = None,
+    selected_feed_url: str | None = None,
+    item_count: int = 0,
+    candidate_payload: dict | None = None,
+    validation_payload: dict | None = None,
+    provider_metadata: dict | None = None,
+) -> dict:
+    run = {
+        "id": str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "candidate_id": _clean_text(candidate_id, 120),
+        "source_id": _clean_text(source_id, 80),
+        "status": _normalize_candidate_validation_status(status),
+        "selected_feed_type": _clean_text(selected_feed_type, 20),
+        "selected_feed_url": _clean_url(selected_feed_url),
+        "item_count": max(0, int(item_count or 0)),
+        "candidate_payload": candidate_payload or {},
+        "validation_payload": validation_payload or {},
+        "provider_metadata": provider_metadata or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        SOURCE_CANDIDATE_VALIDATION_RUNS.insert(0, run)
+        return dict(run)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_candidate_validation_runs (
+                        id, session_id, candidate_id, source_id, status, selected_feed_type,
+                        selected_feed_url, item_count, candidate_payload, validation_payload,
+                        provider_metadata, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["candidate_id"],
+                        run["source_id"],
+                        run["status"],
+                        run["selected_feed_type"],
+                        run["selected_feed_url"],
+                        run["item_count"],
+                        Json(run["candidate_payload"]),
+                        Json(run["validation_payload"]),
+                        Json(run["provider_metadata"]),
+                    ),
+                )
+                return _row_to_source_candidate_validation_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source candidate validation run: {exc}") from exc
+
+
+def list_source_candidate_validation_runs(
+    *,
+    session_id: str | None = None,
+    candidate_id: str | None = None,
+    source_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+    clean_candidate_id = _clean_text(candidate_id, 120)
+    clean_source_id = _clean_text(source_id, 80)
+
+    def matches(run: dict) -> bool:
+        return (
+            (not clean_session_id or run.get("session_id") == clean_session_id)
+            and (not clean_candidate_id or run.get("candidate_id") == clean_candidate_id)
+            and (not clean_source_id or run.get("source_id") == clean_source_id)
+        )
+
+    if not database_enabled():
+        runs = [dict(run) for run in SOURCE_CANDIDATE_VALIDATION_RUNS if matches(run)]
+        return sorted(runs, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_session_id:
+        where.append("session_id = %s")
+        params.append(clean_session_id)
+    if clean_candidate_id:
+        where.append("candidate_id = %s")
+        params.append(clean_candidate_id)
+    if clean_source_id:
+        where.append("source_id::text = %s")
+        params.append(clean_source_id)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_candidate_validation_runs
+                    {where_sql}
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_candidate_validation_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source candidate validation runs: {exc}") from exc
+
+
+def _row_to_source_onboarding_run(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "status": row.get("status") or "completed",
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "source_feed_id": str(row.get("source_feed_id")) if row.get("source_feed_id") else None,
+        "cluster_id": str(row.get("cluster_id")) if row.get("cluster_id") else None,
+        "candidate_id": row.get("candidate_id"),
+        "source_name": row.get("source_name"),
+        "started_at": _row_optional_datetime(row, "started_at"),
+        "finished_at": _row_optional_datetime(row, "finished_at"),
+        "duration_ms": int(row.get("duration_ms") or 0),
+        "phases": row.get("phases") or [],
+        "errors": row.get("errors") or [],
+        "request_payload": row.get("request_payload") or {},
+        "result_payload": row.get("result_payload") or {},
+        "summary": row.get("summary") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_source_onboarding_run(
+    *,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    status: str = "completed",
+    source_id: str | None = None,
+    source_feed_id: str | None = None,
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    source_name: str | None = None,
+    started_at=None,
+    finished_at=None,
+    phases: list[dict] | None = None,
+    errors: list[dict] | None = None,
+    request_payload: dict | None = None,
+    result_payload: dict | None = None,
+    summary: dict | None = None,
+) -> dict:
+    started = _parse_datetime(started_at) or datetime.now(timezone.utc)
+    finished = _parse_datetime(finished_at) or datetime.now(timezone.utc)
+    run = {
+        "id": str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "status": _normalize_workflow_status(status),
+        "source_id": _clean_text(source_id, 80),
+        "source_feed_id": _clean_text(source_feed_id, 80),
+        "cluster_id": _clean_text(cluster_id, 80),
+        "candidate_id": _clean_text(candidate_id, 120),
+        "source_name": _clean_text(source_name, 180),
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_ms": _duration_ms(started, finished),
+        "phases": phases or [],
+        "errors": errors or [],
+        "request_payload": request_payload or {},
+        "result_payload": result_payload or {},
+        "summary": summary or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        SOURCE_ONBOARDING_RUNS.insert(0, run)
+        return dict(run)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_onboarding_runs (
+                        id, session_id, status, source_id, source_feed_id, cluster_id,
+                        candidate_id, source_name, started_at, finished_at, duration_ms,
+                        phases, errors, request_payload, result_payload, summary, created_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    returning *;
+                    """,
+                    (
+                        run["id"],
+                        run["session_id"],
+                        run["status"],
+                        run["source_id"],
+                        run["source_feed_id"],
+                        run["cluster_id"],
+                        run["candidate_id"],
+                        run["source_name"],
+                        run["started_at"],
+                        run["finished_at"],
+                        run["duration_ms"],
+                        Json(run["phases"]),
+                        Json(run["errors"]),
+                        Json(run["request_payload"]),
+                        Json(run["result_payload"]),
+                        Json(run["summary"]),
+                    ),
+                )
+                return _row_to_source_onboarding_run(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source onboarding run: {exc}") from exc
+
+
+def list_source_onboarding_runs(
+    *,
+    session_id: str | None = None,
+    source_id: str | None = None,
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+    clean_source_id = _clean_text(source_id, 80)
+    clean_cluster_id = _clean_text(cluster_id, 80)
+    clean_candidate_id = _clean_text(candidate_id, 120)
+
+    def matches(run: dict) -> bool:
+        return (
+            (not clean_session_id or run.get("session_id") == clean_session_id)
+            and (not clean_source_id or run.get("source_id") == clean_source_id)
+            and (not clean_cluster_id or run.get("cluster_id") == clean_cluster_id)
+            and (not clean_candidate_id or run.get("candidate_id") == clean_candidate_id)
+        )
+
+    if not database_enabled():
+        runs = [dict(run) for run in SOURCE_ONBOARDING_RUNS if matches(run)]
+        return sorted(runs, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where = []
+    params: list[object] = []
+    if clean_session_id:
+        where.append("session_id = %s")
+        params.append(clean_session_id)
+    if clean_source_id:
+        where.append("source_id::text = %s")
+        params.append(clean_source_id)
+    if clean_cluster_id:
+        where.append("cluster_id::text = %s")
+        params.append(clean_cluster_id)
+    if clean_candidate_id:
+        where.append("candidate_id = %s")
+        params.append(clean_candidate_id)
+    where_sql = f"where {' and '.join(where)}" if where else ""
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_onboarding_runs
+                    {where_sql}
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    (*params, limit),
+                )
+                return [_row_to_source_onboarding_run(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source onboarding runs: {exc}") from exc
 
 
 def _row_to_event_cluster_refresh_run(row: dict) -> dict:

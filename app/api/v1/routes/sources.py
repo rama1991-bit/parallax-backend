@@ -22,7 +22,10 @@ from app.services.feed.store import (
     get_ingested_article_record,
     get_source_record,
     list_ingested_article_records,
+    list_source_candidate_validation_runs,
+    list_source_discovery_runs,
     list_source_feed_records,
+    list_source_onboarding_runs,
     list_source_ops_alert_deliveries,
     list_source_ops_alerts,
     list_source_records,
@@ -38,6 +41,7 @@ from app.services.event_clustering import build_event_cluster_source_drafts, res
 from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_discovery import discover_source_candidates, validate_source_candidate
+from app.services.source_onboarding import onboard_source_candidate
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
 router = APIRouter()
@@ -98,6 +102,20 @@ class SourceDiscoveryRequest(BaseModel):
 class SourceCandidateValidationRequest(BaseModel):
     candidate: dict[str, Any]
     allow_homepage_fallback: bool = True
+
+
+class SourceCandidateOnboardingRequest(BaseModel):
+    candidate: dict[str, Any]
+    source_payload: dict[str, Any] | None = None
+    draft_cluster_id: str | None = None
+    draft_candidate_id: str | None = None
+    draft_resolution_notes: str | None = None
+    allow_unvalidated: bool = False
+    allow_homepage_fallback: bool = True
+    sync_after_create: bool = True
+    analyze_after_sync: bool = True
+    refresh_intelligence: bool = True
+    refresh_clusters: bool = True
 
 
 def _url(value: HttpUrl | None) -> str | None:
@@ -244,10 +262,12 @@ async def discover_sources(
     payload: SourceDiscoveryRequest,
     include_external: bool = Query(default=True),
     limit: int = Query(default=8, ge=1, le=20),
+    session_id: str = Depends(get_session_id),
     _: None = Depends(require_admin_key),
 ):
     return await discover_source_candidates(
         query=payload.query,
+        session_id=session_id,
         cluster_id=payload.cluster_id,
         candidate_id=payload.candidate_id,
         country=payload.country,
@@ -263,13 +283,121 @@ async def discover_sources(
 async def validate_discovered_source(
     payload: SourceCandidateValidationRequest,
     limit: int = Query(default=5, ge=1, le=10),
+    session_id: str = Depends(get_session_id),
     _: None = Depends(require_admin_key),
 ):
     return await validate_source_candidate(
         candidate=payload.candidate,
+        session_id=session_id,
         allow_homepage_fallback=payload.allow_homepage_fallback,
         limit=limit,
     )
+
+
+@router.post("/discover/onboard")
+async def onboard_discovered_source(
+    payload: SourceCandidateOnboardingRequest,
+    session_id: str = Depends(get_session_id),
+    validate_limit: int = Query(default=5, ge=1, le=10),
+    sync_article_limit: int = Query(default=5, ge=1, le=50),
+    sync_card_limit: int = Query(default=5, ge=0, le=50),
+    analysis_article_limit: int = Query(default=10, ge=1, le=100),
+    intelligence_article_limit: int = Query(default=50, ge=1, le=250),
+    cluster_article_limit: int = Query(default=100, ge=1, le=250),
+    cluster_limit: int = Query(default=50, ge=1, le=250),
+    cluster_card_limit: int = Query(default=20, ge=0, le=100),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await onboard_source_candidate(
+            candidate=payload.candidate,
+            session_id=session_id,
+            source_payload=payload.source_payload,
+            draft_cluster_id=payload.draft_cluster_id,
+            draft_candidate_id=payload.draft_candidate_id,
+            draft_resolution_notes=payload.draft_resolution_notes,
+            allow_unvalidated=payload.allow_unvalidated,
+            allow_homepage_fallback=payload.allow_homepage_fallback,
+            validate_limit=validate_limit,
+            sync_after_create=payload.sync_after_create,
+            sync_article_limit=sync_article_limit,
+            sync_card_limit=sync_card_limit,
+            analyze_after_sync=payload.analyze_after_sync,
+            analysis_article_limit=analysis_article_limit,
+            refresh_intelligence=payload.refresh_intelligence,
+            intelligence_article_limit=intelligence_article_limit,
+            refresh_clusters=payload.refresh_clusters,
+            cluster_article_limit=cluster_article_limit,
+            cluster_limit=cluster_limit,
+            cluster_card_limit=cluster_card_limit,
+        )
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/discovery-runs")
+async def list_source_discovery_history(
+    session_id: str = Depends(get_session_id),
+    limit: int = Query(default=25, ge=1, le=100),
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    include_all_sessions: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        runs = list_source_discovery_runs(
+            session_id=None if include_all_sessions else session_id,
+            cluster_id=cluster_id,
+            candidate_id=candidate_id,
+            limit=limit,
+        )
+        return {"runs": runs, "summary": {"run_count": len(runs), "latest_run_id": runs[0]["id"] if runs else None}}
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/validation-runs")
+async def list_source_candidate_validation_history(
+    session_id: str = Depends(get_session_id),
+    limit: int = Query(default=25, ge=1, le=100),
+    candidate_id: str | None = None,
+    source_id: str | None = None,
+    include_all_sessions: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        runs = list_source_candidate_validation_runs(
+            session_id=None if include_all_sessions else session_id,
+            candidate_id=candidate_id,
+            source_id=source_id,
+            limit=limit,
+        )
+        return {"runs": runs, "summary": {"run_count": len(runs), "latest_run_id": runs[0]["id"] if runs else None}}
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/onboarding-runs")
+async def list_source_onboarding_history(
+    session_id: str = Depends(get_session_id),
+    limit: int = Query(default=25, ge=1, le=100),
+    source_id: str | None = None,
+    cluster_id: str | None = None,
+    candidate_id: str | None = None,
+    include_all_sessions: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        runs = list_source_onboarding_runs(
+            session_id=None if include_all_sessions else session_id,
+            source_id=source_id,
+            cluster_id=cluster_id,
+            candidate_id=candidate_id,
+            limit=limit,
+        )
+        return {"runs": runs, "summary": {"run_count": len(runs), "latest_run_id": runs[0]["id"] if runs else None}}
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/sync-runs")
@@ -525,6 +653,7 @@ async def get_source(source_id: str, article_limit: int = Query(default=20, ge=1
             "health": build_source_health_summary(source_id),
             "quality": calculate_source_quality_report(source_id),
             "sync_runs": list_source_sync_runs(source_id=source_id, limit=10),
+            "onboarding_runs": list_source_onboarding_runs(source_id=source_id, limit=10),
         }
     except HTTPException:
         raise
