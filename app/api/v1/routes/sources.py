@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 from app.core.admin import require_admin_key
 from app.core.session import get_session_id
@@ -25,6 +25,7 @@ from app.services.feed.store import (
     list_source_candidate_validation_runs,
     list_source_discovery_runs,
     list_source_feed_records,
+    list_source_onboarding_batches,
     list_source_onboarding_runs,
     list_source_ops_alert_deliveries,
     list_source_ops_alerts,
@@ -42,6 +43,7 @@ from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_discovery import discover_source_candidates, validate_source_candidate
 from app.services.source_onboarding import onboard_source_candidate
+from app.services.source_onboarding import onboard_source_candidate_batch, retry_source_onboarding_run
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
 router = APIRouter()
@@ -116,6 +118,28 @@ class SourceCandidateOnboardingRequest(BaseModel):
     analyze_after_sync: bool = True
     refresh_intelligence: bool = True
     refresh_clusters: bool = True
+    require_review_before_sync: bool = False
+
+
+class SourceCandidateBatchOnboardingRequest(BaseModel):
+    items: list[SourceCandidateOnboardingRequest] = Field(default_factory=list)
+    allow_unvalidated: bool = False
+    allow_homepage_fallback: bool = True
+    sync_after_create: bool = True
+    analyze_after_sync: bool = True
+    refresh_intelligence: bool = True
+    refresh_clusters_at_end: bool = True
+    require_review_before_sync: bool = True
+    stop_on_error: bool = False
+
+
+class SourceOnboardingRetryRequest(BaseModel):
+    allow_unvalidated: bool | None = None
+    sync_after_create: bool | None = None
+    analyze_after_sync: bool | None = None
+    refresh_intelligence: bool | None = None
+    refresh_clusters: bool | None = None
+    require_review_before_sync: bool | None = None
 
 
 def _url(value: HttpUrl | None) -> str | None:
@@ -330,6 +354,51 @@ async def onboard_discovered_source(
             cluster_article_limit=cluster_article_limit,
             cluster_limit=cluster_limit,
             cluster_card_limit=cluster_card_limit,
+            require_review_before_sync=payload.require_review_before_sync,
+        )
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/discover/onboard-batch")
+async def onboard_discovered_source_batch(
+    payload: SourceCandidateBatchOnboardingRequest,
+    session_id: str = Depends(get_session_id),
+    validate_limit: int = Query(default=5, ge=1, le=10),
+    sync_article_limit: int = Query(default=5, ge=1, le=50),
+    sync_card_limit: int = Query(default=5, ge=0, le=50),
+    analysis_article_limit: int = Query(default=10, ge=1, le=100),
+    intelligence_article_limit: int = Query(default=50, ge=1, le=250),
+    cluster_article_limit: int = Query(default=100, ge=1, le=250),
+    cluster_limit: int = Query(default=50, ge=1, le=250),
+    cluster_card_limit: int = Query(default=20, ge=0, le=100),
+    limit: int = Query(default=10, ge=1, le=20),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await onboard_source_candidate_batch(
+            items=[
+                item.model_dump() if hasattr(item, "model_dump") else item.dict()
+                for item in payload.items
+            ],
+            session_id=session_id,
+            allow_unvalidated=payload.allow_unvalidated,
+            allow_homepage_fallback=payload.allow_homepage_fallback,
+            validate_limit=validate_limit,
+            sync_after_create=payload.sync_after_create,
+            sync_article_limit=sync_article_limit,
+            sync_card_limit=sync_card_limit,
+            analyze_after_sync=payload.analyze_after_sync,
+            analysis_article_limit=analysis_article_limit,
+            refresh_intelligence=payload.refresh_intelligence,
+            intelligence_article_limit=intelligence_article_limit,
+            refresh_clusters_at_end=payload.refresh_clusters_at_end,
+            cluster_article_limit=cluster_article_limit,
+            cluster_limit=cluster_limit,
+            cluster_card_limit=cluster_card_limit,
+            require_review_before_sync=payload.require_review_before_sync,
+            stop_on_error=payload.stop_on_error,
+            limit=limit,
         )
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -397,6 +466,53 @@ async def list_source_onboarding_history(
         )
         return {"runs": runs, "summary": {"run_count": len(runs), "latest_run_id": runs[0]["id"] if runs else None}}
     except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/onboarding-batches")
+async def list_source_onboarding_batch_history(
+    session_id: str = Depends(get_session_id),
+    limit: int = Query(default=25, ge=1, le=100),
+    include_all_sessions: bool = Query(default=False),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        batches = list_source_onboarding_batches(
+            session_id=None if include_all_sessions else session_id,
+            limit=limit,
+        )
+        return {
+            "batches": batches,
+            "summary": {
+                "batch_count": len(batches),
+                "latest_batch_id": batches[0]["id"] if batches else None,
+            },
+        }
+    except FeedStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/onboarding-runs/{run_id}/retry")
+async def retry_source_onboarding(
+    run_id: str,
+    payload: SourceOnboardingRetryRequest,
+    session_id: str = Depends(get_session_id),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return await retry_source_onboarding_run(
+            run_id=run_id,
+            session_id=session_id,
+            allow_unvalidated=payload.allow_unvalidated,
+            sync_after_create=payload.sync_after_create,
+            analyze_after_sync=payload.analyze_after_sync,
+            refresh_intelligence=payload.refresh_intelligence,
+            refresh_clusters=payload.refresh_clusters,
+            require_review_before_sync=payload.require_review_before_sync,
+        )
+    except FeedStoreError as exc:
+        if str(exc) == "Source onboarding run not found.":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

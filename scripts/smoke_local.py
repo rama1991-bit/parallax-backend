@@ -60,6 +60,7 @@ def _reset_memory_store() -> None:
         store.SOURCE_DISCOVERY_RUNS,
         store.SOURCE_CANDIDATE_VALIDATION_RUNS,
         store.SOURCE_ONBOARDING_RUNS,
+        store.SOURCE_ONBOARDING_BATCHES,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -879,6 +880,71 @@ def main() -> int:
     ).json()
     assert onboarding_runs["summary"]["run_count"] >= 1, onboarding_runs
     assert onboarding_runs["runs"][0]["summary"]["source_created"] is True, onboarding_runs
+    denied_onboarding_batches = client.get("/api/v1/sources/onboarding-batches", headers=headers)
+    assert denied_onboarding_batches.status_code == 403, denied_onboarding_batches.text
+    original_batch_parse_rss = source_discovery_service.parse_rss_feed
+    original_batch_parse_homepage = source_discovery_service.parse_homepage_feed
+    try:
+        source_discovery_service.parse_rss_feed = fake_discovery_parse_rss
+        source_discovery_service.parse_homepage_feed = fake_discovery_parse_homepage
+        batch_onboarding = _assert_ok(
+            client.post(
+                "/api/v1/sources/discover/onboard-batch?limit=2&sync_article_limit=1&sync_card_limit=1&analysis_article_limit=1",
+                json={
+                    "items": [
+                        {
+                            "candidate": {
+                                **validated_source["candidate"],
+                                "id": "batch-candidate-1",
+                                "name": "Batch Fixture Wire",
+                                "website_url": "https://batch.example.com",
+                                "rss_url": "https://batch.example.com/rss.xml",
+                                "rss_url_candidates": ["https://batch.example.com/rss.xml"],
+                            },
+                            "source_payload": {
+                                "name": "Batch Fixture Wire",
+                                "country": "United States",
+                                "language": "English",
+                                "source_type": "independent",
+                            },
+                        }
+                    ],
+                    "sync_after_create": True,
+                    "analyze_after_sync": True,
+                    "refresh_intelligence": True,
+                    "refresh_clusters_at_end": False,
+                    "require_review_before_sync": True,
+                },
+                headers=admin_headers,
+            ),
+            "sources/discover-onboard-batch",
+        ).json()
+        retried_onboarding = _assert_ok(
+            client.post(
+                f"/api/v1/sources/onboarding-runs/{onboarded_source['run']['id']}/retry",
+                json={
+                    "sync_after_create": False,
+                    "analyze_after_sync": False,
+                    "refresh_intelligence": False,
+                    "refresh_clusters": False,
+                },
+                headers=admin_headers,
+            ),
+            "sources/onboarding-run-retry",
+        ).json()
+    finally:
+        source_discovery_service.parse_rss_feed = original_batch_parse_rss
+        source_discovery_service.parse_homepage_feed = original_batch_parse_homepage
+    assert batch_onboarding["summary"]["review_gate_count"] == 1, batch_onboarding
+    assert batch_onboarding["items"][0]["summary"]["review_gate_blocked"] is True, batch_onboarding
+    onboarding_batches = _assert_ok(
+        client.get("/api/v1/sources/onboarding-batches?limit=5", headers=admin_headers),
+        "sources/onboarding-batches",
+    ).json()
+    assert onboarding_batches["summary"]["batch_count"] >= 1, onboarding_batches
+    assert onboarding_batches["batches"][0]["review_gate_count"] >= 1, onboarding_batches
+    assert retried_onboarding["retry_of_run_id"] == onboarded_source["run"]["id"], retried_onboarding
+    assert retried_onboarding["run"]["id"] != onboarded_source["run"]["id"], retried_onboarding
     denied_draft_resolution = client.post(
         f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
         json={"status": "ignored", "resolution_notes": "public request should fail"},

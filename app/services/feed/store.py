@@ -47,6 +47,7 @@ SOURCE_DRAFT_RESOLUTIONS = []
 SOURCE_DISCOVERY_RUNS = []
 SOURCE_CANDIDATE_VALIDATION_RUNS = []
 SOURCE_ONBOARDING_RUNS = []
+SOURCE_ONBOARDING_BATCHES = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -948,6 +949,32 @@ def _ensure_schema():
                     );
                     """,
                     """
+                    create table if not exists public.source_onboarding_batches (
+                        id uuid primary key,
+                        session_id text,
+                        status text not null default 'completed' check (
+                            status in ('completed', 'partial', 'failed', 'skipped')
+                        ),
+                        started_at timestamptz not null default now(),
+                        finished_at timestamptz,
+                        duration_ms integer not null default 0,
+                        candidate_count integer not null default 0,
+                        completed_count integer not null default 0,
+                        partial_count integer not null default 0,
+                        failed_count integer not null default 0,
+                        skipped_count integer not null default 0,
+                        source_count integer not null default 0,
+                        article_count integer not null default 0,
+                        card_count integer not null default 0,
+                        review_gate_count integer not null default 0,
+                        request_payload jsonb not null default '{}'::jsonb,
+                        result_payload jsonb not null default '{}'::jsonb,
+                        errors jsonb not null default '[]'::jsonb,
+                        summary jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now()
+                    );
+                    """,
+                    """
                     create index if not exists idx_event_clusters_latest
                     on public.event_clusters (latest_seen_at desc, article_count desc);
                     """,
@@ -1011,6 +1038,14 @@ def _ensure_schema():
                     create index if not exists idx_source_onboarding_runs_cluster
                     on public.source_onboarding_runs (cluster_id, created_at desc)
                     where cluster_id is not null;
+                    """,
+                    """
+                    create index if not exists idx_source_onboarding_batches_created
+                    on public.source_onboarding_batches (created_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_onboarding_batches_session_created
+                    on public.source_onboarding_batches (session_id, created_at desc);
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -4729,6 +4764,34 @@ def save_source_onboarding_run(
         raise FeedStoreError(f"Could not save source onboarding run: {exc}") from exc
 
 
+def get_source_onboarding_run(run_id: str) -> dict | None:
+    clean_run_id = _clean_text(run_id, 80)
+    if not clean_run_id:
+        return None
+
+    if not database_enabled():
+        run = next((dict(item) for item in SOURCE_ONBOARDING_RUNS if item.get("id") == clean_run_id), None)
+        return run
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select *
+                    from public.source_onboarding_runs
+                    where id::text = %s
+                    limit 1;
+                    """,
+                    (clean_run_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_source_onboarding_run(row) if row else None
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not load source onboarding run: {exc}") from exc
+
+
 def list_source_onboarding_runs(
     *,
     session_id: str | None = None,
@@ -4787,6 +4850,163 @@ def list_source_onboarding_runs(
                 return [_row_to_source_onboarding_run(row) for row in cur.fetchall()]
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not list source onboarding runs: {exc}") from exc
+
+
+def _row_to_source_onboarding_batch(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "session_id": row.get("session_id") or ANONYMOUS_SESSION_ID,
+        "status": row.get("status") or "completed",
+        "started_at": _row_optional_datetime(row, "started_at"),
+        "finished_at": _row_optional_datetime(row, "finished_at"),
+        "duration_ms": int(row.get("duration_ms") or 0),
+        "candidate_count": int(row.get("candidate_count") or 0),
+        "completed_count": int(row.get("completed_count") or 0),
+        "partial_count": int(row.get("partial_count") or 0),
+        "failed_count": int(row.get("failed_count") or 0),
+        "skipped_count": int(row.get("skipped_count") or 0),
+        "source_count": int(row.get("source_count") or 0),
+        "article_count": int(row.get("article_count") or 0),
+        "card_count": int(row.get("card_count") or 0),
+        "review_gate_count": int(row.get("review_gate_count") or 0),
+        "request_payload": row.get("request_payload") or {},
+        "result_payload": row.get("result_payload") or {},
+        "errors": row.get("errors") or [],
+        "summary": row.get("summary") or {},
+        "created_at": _row_created_at(row),
+    }
+
+
+def save_source_onboarding_batch(
+    *,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    status: str = "completed",
+    started_at=None,
+    finished_at=None,
+    candidate_count: int = 0,
+    completed_count: int = 0,
+    partial_count: int = 0,
+    failed_count: int = 0,
+    skipped_count: int = 0,
+    source_count: int = 0,
+    article_count: int = 0,
+    card_count: int = 0,
+    review_gate_count: int = 0,
+    request_payload: dict | None = None,
+    result_payload: dict | None = None,
+    errors: list[dict] | None = None,
+    summary: dict | None = None,
+) -> dict:
+    started = _parse_datetime(started_at) or datetime.now(timezone.utc)
+    finished = _parse_datetime(finished_at) or datetime.now(timezone.utc)
+    batch = {
+        "id": str(uuid4()),
+        "session_id": session_id or ANONYMOUS_SESSION_ID,
+        "status": _normalize_workflow_status(status),
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_ms": _duration_ms(started, finished),
+        "candidate_count": max(0, int(candidate_count or 0)),
+        "completed_count": max(0, int(completed_count or 0)),
+        "partial_count": max(0, int(partial_count or 0)),
+        "failed_count": max(0, int(failed_count or 0)),
+        "skipped_count": max(0, int(skipped_count or 0)),
+        "source_count": max(0, int(source_count or 0)),
+        "article_count": max(0, int(article_count or 0)),
+        "card_count": max(0, int(card_count or 0)),
+        "review_gate_count": max(0, int(review_gate_count or 0)),
+        "request_payload": request_payload or {},
+        "result_payload": result_payload or {},
+        "errors": errors or [],
+        "summary": summary or {},
+        "created_at": now_iso(),
+    }
+
+    if not database_enabled():
+        SOURCE_ONBOARDING_BATCHES.insert(0, batch)
+        return dict(batch)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_onboarding_batches (
+                        id, session_id, status, started_at, finished_at, duration_ms,
+                        candidate_count, completed_count, partial_count, failed_count,
+                        skipped_count, source_count, article_count, card_count,
+                        review_gate_count, request_payload, result_payload, errors,
+                        summary, created_at
+                    )
+                    values (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, now()
+                    )
+                    returning *;
+                    """,
+                    (
+                        batch["id"],
+                        batch["session_id"],
+                        batch["status"],
+                        batch["started_at"],
+                        batch["finished_at"],
+                        batch["duration_ms"],
+                        batch["candidate_count"],
+                        batch["completed_count"],
+                        batch["partial_count"],
+                        batch["failed_count"],
+                        batch["skipped_count"],
+                        batch["source_count"],
+                        batch["article_count"],
+                        batch["card_count"],
+                        batch["review_gate_count"],
+                        Json(batch["request_payload"]),
+                        Json(batch["result_payload"]),
+                        Json(batch["errors"]),
+                        Json(batch["summary"]),
+                    ),
+                )
+                return _row_to_source_onboarding_batch(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source onboarding batch: {exc}") from exc
+
+
+def list_source_onboarding_batches(
+    *,
+    session_id: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    limit = max(1, min(int(limit or 25), 100))
+    clean_session_id = _clean_text(session_id, 120)
+
+    if not database_enabled():
+        batches = [
+            dict(batch)
+            for batch in SOURCE_ONBOARDING_BATCHES
+            if not clean_session_id or batch.get("session_id") == clean_session_id
+        ]
+        return sorted(batches, key=lambda item: item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    where_sql = "where session_id = %s" if clean_session_id else ""
+    params: tuple[object, ...] = (clean_session_id, limit) if clean_session_id else (limit,)
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    select *
+                    from public.source_onboarding_batches
+                    {where_sql}
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    params,
+                )
+                return [_row_to_source_onboarding_batch(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source onboarding batches: {exc}") from exc
 
 
 def _row_to_event_cluster_refresh_run(row: dict) -> dict:

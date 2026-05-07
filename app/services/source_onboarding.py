@@ -8,7 +8,9 @@ from app.services.feed.store import (
     FeedStoreError,
     create_source_feed_record,
     create_source_record,
+    get_source_onboarding_run,
     get_source_record,
+    save_source_onboarding_batch,
     save_source_onboarding_run,
 )
 from app.services.ingested_analysis import analyze_pending_ingested_articles
@@ -146,6 +148,19 @@ def _compact_sync_result(result: dict | None) -> dict:
     }
 
 
+def _source_reviewed(source: dict | None) -> bool:
+    return bool(source and source.get("review_status") == "reviewed")
+
+
+def _coverage_delta_score(coverage_delta: dict) -> float:
+    synced = min(0.35, 0.07 * float(coverage_delta.get("synced_articles") or 0))
+    analyzed = min(0.3, 0.06 * float(coverage_delta.get("analyzed_articles") or 0))
+    cards = min(0.15, 0.03 * float(coverage_delta.get("new_cards") or 0))
+    clusters = 0.1 if int(coverage_delta.get("cluster_count") or 0) > 0 else 0
+    tasks = min(0.1, 0.02 * float(coverage_delta.get("coverage_gap_task_count") or 0))
+    return round(min(1.0, synced + analyzed + cards + clusters + tasks), 3)
+
+
 async def onboard_source_candidate(
     *,
     candidate: dict,
@@ -168,6 +183,7 @@ async def onboard_source_candidate(
     cluster_article_limit: int = 100,
     cluster_limit: int = 50,
     cluster_card_limit: int = 20,
+    require_review_before_sync: bool = False,
 ) -> dict:
     started = datetime.now(timezone.utc)
     phases: list[dict] = []
@@ -188,6 +204,7 @@ async def onboard_source_candidate(
         "analyze_after_sync": analyze_after_sync,
         "refresh_intelligence": refresh_intelligence,
         "refresh_clusters": refresh_clusters,
+        "require_review_before_sync": require_review_before_sync,
     }
 
     try:
@@ -271,6 +288,23 @@ async def onboard_source_candidate(
         phases.append(_phase("source_creation", "failed", error=str(exc)))
 
     before_article_count = int((source or {}).get("article_count") or 0)
+    review_gate_blocked = False
+
+    if source and require_review_before_sync:
+        if _source_reviewed(source):
+            phases.append(_phase("review_gate", "completed", review_status=source.get("review_status")))
+        else:
+            review_gate_blocked = True
+            phases.append(
+                _phase(
+                    "review_gate",
+                    "needs_review",
+                    review_status=source.get("review_status"),
+                    reason="Source must be reviewed before automated sync, analysis, and refresh phases run.",
+                )
+            )
+    elif source:
+        phases.append(_phase("review_gate", "skipped", reason="Review gate was not required."))
 
     if source and draft_cluster_id and draft_candidate_id:
         try:
@@ -289,7 +323,7 @@ async def onboard_source_candidate(
             phases.append(_phase("source_draft_resolution", "failed", error=str(exc)))
 
     sync_result = None
-    if source and sync_after_create and feed and feed.get("feed_type") != "manual":
+    if source and not review_gate_blocked and sync_after_create and feed and feed.get("feed_type") != "manual":
         try:
             sync_result = await sync_source_feeds(
                 source["id"],
@@ -316,7 +350,7 @@ async def onboard_source_candidate(
         phases.append(_phase("source_sync", "skipped"))
 
     analysis_result = None
-    if source and analyze_after_sync:
+    if source and not review_gate_blocked and analyze_after_sync:
         try:
             analysis_result = await analyze_pending_ingested_articles(
                 session_id=session_id,
@@ -345,7 +379,7 @@ async def onboard_source_candidate(
         phases.append(_phase("article_analysis", "skipped"))
 
     intelligence_result = None
-    if source and refresh_intelligence:
+    if source and not review_gate_blocked and refresh_intelligence:
         try:
             intelligence_result = await build_source_intelligence(
                 source["id"],
@@ -372,7 +406,7 @@ async def onboard_source_candidate(
         phases.append(_phase("source_intelligence", "skipped"))
 
     cluster_result = None
-    if source and refresh_clusters:
+    if source and not review_gate_blocked and refresh_clusters:
         try:
             cluster_result = refresh_event_clusters(
                 session_id=session_id,
@@ -413,11 +447,13 @@ async def onboard_source_candidate(
         "coverage_gap_task_count": ((cluster_result or {}).get("run") or {}).get("summary", {}).get("coverage_gap_task_count", 0),
         "suggested_source_search_count": ((cluster_result or {}).get("run") or {}).get("summary", {}).get("suggested_source_search_count", 0),
     }
+    coverage_delta["score"] = _coverage_delta_score(coverage_delta)
     summary = {
         "source_created": bool(source),
         "source_id": (source or {}).get("id"),
         "source_name": (source or {}).get("name") or _clean_text(candidate.get("name")),
         "validation_status": validation_status,
+        "review_gate_blocked": review_gate_blocked,
         "coverage_delta": coverage_delta,
         "phase_count": len(phases),
         "error_count": len(errors),
@@ -452,3 +488,232 @@ async def onboard_source_candidate(
         "summary": summary,
         "results": result_payload,
     }
+
+
+def _batch_item_payload(item: dict) -> dict:
+    return {
+        "candidate": item.get("candidate") or item,
+        "source_payload": item.get("source_payload"),
+        "draft_cluster_id": item.get("draft_cluster_id"),
+        "draft_candidate_id": item.get("draft_candidate_id"),
+        "draft_resolution_notes": item.get("draft_resolution_notes"),
+    }
+
+
+def _batch_status(items: list[dict], errors: list[dict]) -> str:
+    statuses = {item.get("status") for item in items}
+    if not items:
+        return "skipped"
+    if "failed" in statuses:
+        return "partial" if statuses - {"failed"} else "failed"
+    if "partial" in statuses or errors:
+        return "partial"
+    if statuses == {"skipped"}:
+        return "skipped"
+    return "completed"
+
+
+async def onboard_source_candidate_batch(
+    *,
+    items: list[dict],
+    session_id: str = ANONYMOUS_SESSION_ID,
+    allow_unvalidated: bool = False,
+    allow_homepage_fallback: bool = True,
+    validate_limit: int = 5,
+    sync_after_create: bool = True,
+    sync_article_limit: int = 5,
+    sync_card_limit: int = 5,
+    analyze_after_sync: bool = True,
+    analysis_article_limit: int = 10,
+    refresh_intelligence: bool = True,
+    intelligence_article_limit: int = 50,
+    refresh_clusters_at_end: bool = True,
+    cluster_article_limit: int = 100,
+    cluster_limit: int = 50,
+    cluster_card_limit: int = 20,
+    require_review_before_sync: bool = True,
+    stop_on_error: bool = False,
+    limit: int = 10,
+) -> dict:
+    started = datetime.now(timezone.utc)
+    max_items = max(1, min(int(limit or 10), 20))
+    selected_items = [item for item in (items or []) if item][:max_items]
+    results = []
+    errors = []
+
+    for index, raw_item in enumerate(selected_items):
+        item = _batch_item_payload(raw_item)
+        try:
+            result = await onboard_source_candidate(
+                candidate=item["candidate"],
+                session_id=session_id,
+                source_payload=item.get("source_payload"),
+                draft_cluster_id=item.get("draft_cluster_id"),
+                draft_candidate_id=item.get("draft_candidate_id"),
+                draft_resolution_notes=item.get("draft_resolution_notes"),
+                allow_unvalidated=allow_unvalidated,
+                allow_homepage_fallback=allow_homepage_fallback,
+                validate_limit=validate_limit,
+                sync_after_create=sync_after_create,
+                sync_article_limit=sync_article_limit,
+                sync_card_limit=sync_card_limit,
+                analyze_after_sync=analyze_after_sync,
+                analysis_article_limit=analysis_article_limit,
+                refresh_intelligence=refresh_intelligence,
+                intelligence_article_limit=intelligence_article_limit,
+                refresh_clusters=False,
+                cluster_article_limit=cluster_article_limit,
+                cluster_limit=cluster_limit,
+                cluster_card_limit=cluster_card_limit,
+                require_review_before_sync=require_review_before_sync,
+            )
+            results.append(
+                {
+                    "index": index,
+                    "status": result.get("status"),
+                    "run_id": (result.get("run") or {}).get("id"),
+                    "source_id": (result.get("source") or {}).get("id"),
+                    "source_name": (result.get("source") or {}).get("name") or (item["candidate"] or {}).get("name"),
+                    "summary": result.get("summary") or {},
+                    "errors": result.get("errors") or [],
+                }
+            )
+            if result.get("status") == "failed" and stop_on_error:
+                break
+        except Exception as exc:
+            error = {"index": index, **_compact_error("batch_onboarding", exc)}
+            errors.append(error)
+            results.append(
+                {
+                    "index": index,
+                    "status": "failed",
+                    "source_name": (item["candidate"] or {}).get("name"),
+                    "summary": {"source_created": False, "error_count": 1},
+                    "errors": [error],
+                }
+            )
+            if stop_on_error:
+                break
+
+    cluster_result = None
+    if refresh_clusters_at_end and any(item.get("source_id") for item in results):
+        try:
+            cluster_result = refresh_event_clusters(
+                session_id=session_id,
+                article_limit=cluster_article_limit,
+                cluster_limit=cluster_limit,
+                card_limit=cluster_card_limit,
+            )
+        except Exception as exc:
+            errors.append(_compact_error("batch_cluster_refresh", exc))
+
+    completed_count = len([item for item in results if item.get("status") == "completed"])
+    partial_count = len([item for item in results if item.get("status") == "partial"])
+    failed_count = len([item for item in results if item.get("status") == "failed"])
+    skipped_count = len([item for item in results if item.get("status") == "skipped"])
+    source_count = len({item.get("source_id") for item in results if item.get("source_id")})
+    article_count = sum((item.get("summary") or {}).get("coverage_delta", {}).get("synced_articles", 0) for item in results)
+    card_count = sum((item.get("summary") or {}).get("coverage_delta", {}).get("new_cards", 0) for item in results)
+    review_gate_count = len([item for item in results if (item.get("summary") or {}).get("review_gate_blocked")])
+    coverage_score_values = [
+        (item.get("summary") or {}).get("coverage_delta", {}).get("score")
+        for item in results
+        if (item.get("summary") or {}).get("coverage_delta", {}).get("score") is not None
+    ]
+    summary = {
+        "candidate_count": len(selected_items),
+        "processed_count": len(results),
+        "completed_count": completed_count,
+        "partial_count": partial_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "source_count": source_count,
+        "article_count": article_count,
+        "card_count": card_count,
+        "review_gate_count": review_gate_count,
+        "average_coverage_delta_score": (
+            round(sum(float(value) for value in coverage_score_values) / len(coverage_score_values), 3)
+            if coverage_score_values
+            else 0.0
+        ),
+        "cluster_count": (cluster_result or {}).get("cluster_count", 0),
+        "cluster_card_count": (cluster_result or {}).get("card_count", 0),
+    }
+    status = _batch_status(results, errors)
+    finished = datetime.now(timezone.utc)
+    batch = save_source_onboarding_batch(
+        session_id=session_id,
+        status=status,
+        started_at=started,
+        finished_at=finished,
+        candidate_count=len(selected_items),
+        completed_count=completed_count,
+        partial_count=partial_count,
+        failed_count=failed_count,
+        skipped_count=skipped_count,
+        source_count=source_count,
+        article_count=article_count,
+        card_count=card_count,
+        review_gate_count=review_gate_count,
+        request_payload={
+            "items": selected_items,
+            "allow_unvalidated": allow_unvalidated,
+            "allow_homepage_fallback": allow_homepage_fallback,
+            "sync_after_create": sync_after_create,
+            "analyze_after_sync": analyze_after_sync,
+            "refresh_intelligence": refresh_intelligence,
+            "refresh_clusters_at_end": refresh_clusters_at_end,
+            "require_review_before_sync": require_review_before_sync,
+            "stop_on_error": stop_on_error,
+        },
+        result_payload={"items": results, "cluster_refresh": cluster_result},
+        errors=errors,
+        summary=summary,
+    )
+    return {
+        "status": status,
+        "batch": batch,
+        "items": results,
+        "cluster_refresh": cluster_result,
+        "errors": errors,
+        "summary": summary,
+    }
+
+
+async def retry_source_onboarding_run(
+    *,
+    run_id: str,
+    session_id: str = ANONYMOUS_SESSION_ID,
+    allow_unvalidated: bool | None = None,
+    sync_after_create: bool | None = None,
+    analyze_after_sync: bool | None = None,
+    refresh_intelligence: bool | None = None,
+    refresh_clusters: bool | None = None,
+    require_review_before_sync: bool | None = None,
+) -> dict:
+    original = get_source_onboarding_run(run_id)
+    if not original:
+        raise FeedStoreError("Source onboarding run not found.")
+    request_payload = original.get("request_payload") or {}
+    result = await onboard_source_candidate(
+        candidate=request_payload.get("candidate") or {},
+        session_id=session_id,
+        source_payload=request_payload.get("source_payload") or {},
+        draft_cluster_id=request_payload.get("draft_cluster_id"),
+        draft_candidate_id=request_payload.get("draft_candidate_id"),
+        draft_resolution_notes="Retry from source onboarding run.",
+        allow_unvalidated=request_payload.get("allow_unvalidated") if allow_unvalidated is None else allow_unvalidated,
+        allow_homepage_fallback=request_payload.get("allow_homepage_fallback", True),
+        sync_after_create=request_payload.get("sync_after_create", True) if sync_after_create is None else sync_after_create,
+        analyze_after_sync=request_payload.get("analyze_after_sync", True) if analyze_after_sync is None else analyze_after_sync,
+        refresh_intelligence=request_payload.get("refresh_intelligence", True) if refresh_intelligence is None else refresh_intelligence,
+        refresh_clusters=request_payload.get("refresh_clusters", True) if refresh_clusters is None else refresh_clusters,
+        require_review_before_sync=(
+            request_payload.get("require_review_before_sync", False)
+            if require_review_before_sync is None
+            else require_review_before_sync
+        ),
+    )
+    result["retry_of_run_id"] = run_id
+    result["original_run"] = original
+    return result
