@@ -37,6 +37,7 @@ from app.services.intelligence_aggregation import build_source_intelligence
 from app.services.event_clustering import build_event_cluster_source_drafts, resolve_event_cluster_source_draft
 from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
+from app.services.source_discovery import discover_source_candidates
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
 router = APIRouter()
@@ -82,6 +83,16 @@ class SourceFeedGovernanceUpdate(BaseModel):
     status: Literal["active", "paused", "quarantined", "disabled"]
     disabled_reason: str | None = None
     review_notes: str | None = None
+
+
+class SourceDiscoveryRequest(BaseModel):
+    query: str
+    cluster_id: str | None = None
+    candidate_id: str | None = None
+    country: str | None = None
+    language: str | None = None
+    region: str | None = None
+    source_type: str | None = None
 
 
 def _url(value: HttpUrl | None) -> str | None:
@@ -221,6 +232,26 @@ async def sync_active_sources(
         )
     except FeedStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/discover")
+async def discover_sources(
+    payload: SourceDiscoveryRequest,
+    include_external: bool = Query(default=True),
+    limit: int = Query(default=8, ge=1, le=20),
+    _: None = Depends(require_admin_key),
+):
+    return await discover_source_candidates(
+        query=payload.query,
+        cluster_id=payload.cluster_id,
+        candidate_id=payload.candidate_id,
+        country=payload.country,
+        language=payload.language,
+        region=payload.region,
+        source_type=payload.source_type,
+        include_external=include_external,
+        limit=limit,
+    )
 
 
 @router.get("/sync-runs")

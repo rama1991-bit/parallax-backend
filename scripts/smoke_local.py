@@ -735,6 +735,29 @@ def main() -> int:
     draft_candidate = source_drafts["source_candidates"][0]
     assert "cluster_id=" in draft_candidate["source_manager_url"], draft_candidate
     assert "candidate_id=" in draft_candidate["source_manager_url"], draft_candidate
+    denied_discovery = client.post(
+        "/api/v1/sources/discover",
+        json={"query": draft_candidate["search_query"]},
+        headers=headers,
+    )
+    assert denied_discovery.status_code == 403, denied_discovery.text
+    discovered_sources = _assert_ok(
+        client.post(
+            "/api/v1/sources/discover?include_external=true&limit=5",
+            json={
+                "query": draft_candidate["search_query"],
+                "cluster_id": clusters["items"][0]["id"],
+                "candidate_id": draft_candidate["id"],
+                "language": draft_candidate.get("language"),
+                "source_type": draft_candidate.get("source_type"),
+            },
+            headers=admin_headers,
+        ),
+        "sources/discover-from-cluster-draft",
+    ).json()
+    assert discovered_sources["candidates"], discovered_sources
+    assert discovered_sources["candidates"][0]["create_payload"]["website_url"], discovered_sources
+    assert discovered_sources["retrieval_mode"]["external_requested"], discovered_sources
     denied_draft_resolution = client.post(
         f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
         json={"status": "ignored", "resolution_notes": "public request should fail"},
