@@ -28,6 +28,7 @@ from app.services import ingested_analysis as ingested_analysis_service  # noqa:
 from app.services import intelligence as intelligence_service  # noqa: E402
 from app.services import ops_notifications as ops_notification_service  # noqa: E402
 from app.services import osint as osint_service  # noqa: E402
+from app.services import source_discovery as source_discovery_service  # noqa: E402
 from app.services import source_sync as source_sync_service  # noqa: E402
 from app.services.feed import store  # noqa: E402
 
@@ -758,6 +759,56 @@ def main() -> int:
     assert discovered_sources["candidates"], discovered_sources
     assert discovered_sources["candidates"][0]["create_payload"]["website_url"], discovered_sources
     assert discovered_sources["retrieval_mode"]["external_requested"], discovered_sources
+    validation_candidate = {
+        **discovered_sources["candidates"][0],
+        "rss_url": "https://discovery.example.com/rss.xml",
+        "rss_url_candidates": ["https://discovery.example.com/rss.xml"],
+    }
+    denied_validation = client.post(
+        "/api/v1/sources/discover/validate",
+        json={"candidate": validation_candidate},
+        headers=headers,
+    )
+    assert denied_validation.status_code == 403, denied_validation.text
+    original_discovery_parse_rss = source_discovery_service.parse_rss_feed
+    original_discovery_parse_homepage = source_discovery_service.parse_homepage_feed
+
+    async def fake_discovery_parse_rss(url: str, limit: int = 20):
+        return {
+            "url": url,
+            "title": "Discovery Fixture RSS",
+            "description": "Validated discovery candidate feed.",
+            "items": [
+                {
+                    "external_id": "discovery-item-1",
+                    "title": "Discovery candidate validates grid coverage",
+                    "summary": "Validation fixture item.",
+                    "url": "https://discovery.example.com/item",
+                    "source": "Discovery Fixture RSS",
+                }
+            ],
+        }
+
+    async def fake_discovery_parse_homepage(url: str, limit: int = 20):
+        raise source_discovery_service.HomepageSyncError("homepage should not be needed")
+
+    try:
+        source_discovery_service.parse_rss_feed = fake_discovery_parse_rss
+        source_discovery_service.parse_homepage_feed = fake_discovery_parse_homepage
+        validated_source = _assert_ok(
+            client.post(
+                "/api/v1/sources/discover/validate?limit=3",
+                json={"candidate": validation_candidate},
+                headers=admin_headers,
+            ),
+            "sources/discover-validate",
+        ).json()
+    finally:
+        source_discovery_service.parse_rss_feed = original_discovery_parse_rss
+        source_discovery_service.parse_homepage_feed = original_discovery_parse_homepage
+    assert validated_source["validation"]["status"] == "validated", validated_source
+    assert validated_source["candidate"]["validation_status"] == "validated", validated_source
+    assert validated_source["candidate"]["create_payload"]["rss_url"], validated_source
     denied_draft_resolution = client.post(
         f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
         json={"status": "ignored", "resolution_notes": "public request should fail"},

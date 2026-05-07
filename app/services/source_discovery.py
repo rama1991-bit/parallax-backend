@@ -8,8 +8,10 @@ from urllib.parse import urlparse, urlunparse
 from app.core.config import settings
 from app.services.default_sources import DEFAULT_NEWS_SOURCES
 from app.services.feed.store import list_source_records
+from app.services.homepage import HomepageSyncError, parse_homepage_feed
 from app.services.intelligence import provider_metadata
 from app.services.osint import OSINTContextError, fetch_public_search_results
+from app.services.rss import RSSSyncError, parse_rss_feed
 
 
 STOPWORDS = {
@@ -97,6 +99,11 @@ def _source_payload(candidate: dict) -> dict:
     }
 
 
+def _with_source_payload(candidate: dict) -> dict:
+    candidate["create_payload"] = _source_payload(candidate)
+    return candidate
+
+
 def _candidate_id(*parts: object) -> str:
     key = "|".join(_clean_text(part, 500).lower() for part in parts if part)
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
@@ -172,8 +179,7 @@ def _default_source_candidates(query: str, hints: dict, limit: int, existing_by_
                 "A matched source is a discovery candidate, not an endorsement.",
             ],
         }
-        candidate["create_payload"] = _source_payload(candidate)
-        candidates.append(candidate)
+        candidates.append(_with_source_payload(candidate))
         if len(candidates) >= limit:
             break
     return candidates
@@ -221,8 +227,7 @@ def _search_result_candidates(results: list[dict], hints: dict, limit: int, exis
                 "A domain surfaced by search may be an article page, mirror, or SEO result rather than a stable source homepage.",
             ],
         }
-        candidate["create_payload"] = _source_payload(candidate)
-        candidates.append(candidate)
+        candidates.append(_with_source_payload(candidate))
         if len(candidates) >= limit:
             break
     return candidates
@@ -307,4 +312,136 @@ async def discover_source_candidates(
             "Public web search is used only when external retrieval is explicitly enabled.",
         ],
         "provider_metadata": provider_metadata(task="source_discovery", status="heuristic"),
+    }
+
+
+def _candidate_url_list(candidate: dict, key: str) -> list[str]:
+    values = []
+    value = candidate.get(key)
+    if isinstance(value, str) and value.strip():
+        values.append(value.strip())
+    if key == "rss_url":
+        for item in candidate.get("rss_url_candidates") or []:
+            if isinstance(item, str) and item.strip():
+                values.append(item.strip())
+    deduped = []
+    seen = set()
+    for url in values:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped[:6]
+
+
+def _validation_attempt(feed_type: str, url: str, status: str, parsed: dict | None = None, error: str | None = None) -> dict:
+    parsed = parsed or {}
+    return {
+        "feed_type": feed_type,
+        "url": url,
+        "status": status,
+        "title": parsed.get("title"),
+        "item_count": len(parsed.get("items") or []),
+        "error": error,
+    }
+
+
+def _candidate_with_validation(candidate: dict, validation: dict) -> dict:
+    enriched = {
+        **candidate,
+        "validation_status": validation.get("status"),
+        "validation": validation,
+    }
+    if validation.get("selected_feed_type"):
+        enriched["feed_type"] = validation["selected_feed_type"]
+    if validation.get("selected_feed_type") == "rss":
+        enriched["rss_url"] = validation.get("selected_feed_url") or enriched.get("rss_url")
+    if validation.get("selected_feed_type") == "homepage":
+        enriched["website_url"] = validation.get("selected_feed_url") or enriched.get("website_url")
+    if validation.get("title") and not enriched.get("name"):
+        enriched["name"] = validation["title"]
+    return _with_source_payload(enriched)
+
+
+async def validate_source_candidate(
+    *,
+    candidate: dict,
+    allow_homepage_fallback: bool = True,
+    limit: int = 5,
+) -> dict:
+    limit = max(1, min(int(limit or 5), 10))
+    candidate = dict(candidate or {})
+    attempts = []
+
+    for rss_url in _candidate_url_list(candidate, "rss_url"):
+        try:
+            parsed = await parse_rss_feed(rss_url, limit=limit)
+            attempts.append(_validation_attempt("rss", rss_url, "validated", parsed=parsed))
+            if parsed.get("items"):
+                validation = {
+                    "status": "validated",
+                    "selected_feed_type": "rss",
+                    "selected_feed_url": parsed.get("url") or rss_url,
+                    "title": parsed.get("title"),
+                    "description": parsed.get("description"),
+                    "item_count": len(parsed.get("items") or []),
+                    "attempts": attempts,
+                    "risks": [
+                        "Validation confirms the feed is readable now; it does not validate editorial credibility or future availability.",
+                    ],
+                }
+                return {
+                    "candidate": _candidate_with_validation(candidate, validation),
+                    "validation": validation,
+                    "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
+                }
+        except RSSSyncError as exc:
+            attempts.append(_validation_attempt("rss", rss_url, "failed", error=str(exc)))
+
+    website_urls = _candidate_url_list(candidate, "website_url")
+    if allow_homepage_fallback:
+        for website_url in website_urls:
+            try:
+                parsed = await parse_homepage_feed(website_url, limit=limit)
+                status = "validated" if parsed.get("items") else "needs_review"
+                attempts.append(_validation_attempt("homepage", website_url, status, parsed=parsed))
+                validation = {
+                    "status": status,
+                    "selected_feed_type": "homepage",
+                    "selected_feed_url": parsed.get("url") or website_url,
+                    "title": parsed.get("title"),
+                    "description": parsed.get("description"),
+                    "item_count": len(parsed.get("items") or []),
+                    "attempts": attempts,
+                    "risks": [
+                        "Homepage validation is heuristic; article links can be sparse, blocked, or layout-dependent.",
+                        "Validation does not assess editorial reliability.",
+                    ],
+                }
+                return {
+                    "candidate": _candidate_with_validation(candidate, validation),
+                    "validation": validation,
+                    "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
+                }
+            except HomepageSyncError as exc:
+                attempts.append(_validation_attempt("homepage", website_url, "failed", error=str(exc)))
+
+    status = "needs_review" if not attempts and candidate.get("feed_type") == "manual" else "failed"
+    validation = {
+        "status": status,
+        "selected_feed_type": "manual" if status == "needs_review" else None,
+        "selected_feed_url": None,
+        "title": candidate.get("name"),
+        "description": None,
+        "item_count": 0,
+        "attempts": attempts,
+        "risks": [
+            "No readable RSS or homepage feed was validated.",
+            "Use admin override only after manual source review.",
+        ],
+    }
+    return {
+        "candidate": _candidate_with_validation(candidate, validation),
+        "validation": validation,
+        "provider_metadata": provider_metadata(task="source_candidate_validation", status="heuristic"),
     }

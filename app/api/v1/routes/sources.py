@@ -37,7 +37,7 @@ from app.services.intelligence_aggregation import build_source_intelligence
 from app.services.event_clustering import build_event_cluster_source_drafts, resolve_event_cluster_source_draft
 from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
-from app.services.source_discovery import discover_source_candidates
+from app.services.source_discovery import discover_source_candidates, validate_source_candidate
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
 
 router = APIRouter()
@@ -93,6 +93,11 @@ class SourceDiscoveryRequest(BaseModel):
     language: str | None = None
     region: str | None = None
     source_type: str | None = None
+
+
+class SourceCandidateValidationRequest(BaseModel):
+    candidate: dict[str, Any]
+    allow_homepage_fallback: bool = True
 
 
 def _url(value: HttpUrl | None) -> str | None:
@@ -250,6 +255,19 @@ async def discover_sources(
         region=payload.region,
         source_type=payload.source_type,
         include_external=include_external,
+        limit=limit,
+    )
+
+
+@router.post("/discover/validate")
+async def validate_discovered_source(
+    payload: SourceCandidateValidationRequest,
+    limit: int = Query(default=5, ge=1, le=10),
+    _: None = Depends(require_admin_key),
+):
+    return await validate_source_candidate(
+        candidate=payload.candidate,
+        allow_homepage_fallback=payload.allow_homepage_fallback,
         limit=limit,
     )
 
