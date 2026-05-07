@@ -717,6 +717,20 @@ def main() -> int:
     assert cluster_detail["cluster"]["id"] == clusters["items"][0]["id"], cluster_detail
     assert cluster_detail["articles"], cluster_detail
     assert "coverage_gap_tasks" in cluster_detail, cluster_detail
+    denied_source_drafts = client.get(
+        f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts",
+        headers=headers,
+    )
+    assert denied_source_drafts.status_code == 403, denied_source_drafts.text
+    source_drafts = _assert_ok(
+        client.get(
+            f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts?limit=4",
+            headers=admin_headers,
+        ),
+        "intelligence/cluster-source-drafts",
+    ).json()
+    assert source_drafts["source_candidates"], source_drafts
+    assert source_drafts["source_candidates"][0]["source_manager_url"].startswith("/sources?"), source_drafts
     clustered_compare = _assert_ok(
         client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
         "compare/ingested-article-clustered",

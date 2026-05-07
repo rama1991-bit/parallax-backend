@@ -6,6 +6,7 @@ import hashlib
 import re
 import unicodedata
 from typing import Any
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from app.core.session import ANONYMOUS_SESSION_ID
@@ -479,6 +480,99 @@ def _search_query(*parts: Any) -> str:
     return " ".join(dict.fromkeys(term.strip() for term in terms if term and term.strip()))[:240]
 
 
+def _source_draft_url(draft: dict) -> str:
+    params = {
+        "draft_name": draft.get("name"),
+        "feed_type": draft.get("feed_type"),
+        "country": draft.get("country"),
+        "language": draft.get("language"),
+        "region": draft.get("region"),
+        "source_size": draft.get("source_size"),
+        "source_type": draft.get("source_type"),
+        "credibility_notes": draft.get("credibility_notes"),
+        "search_query": draft.get("search_query"),
+    }
+    return "/sources?" + urlencode({key: value for key, value in params.items() if value})
+
+
+def _source_candidates_from_automation(
+    *,
+    title: str,
+    primary_topic: str | None,
+    countries: list[str],
+    tasks: list[dict],
+    searches: list[dict],
+) -> list[dict]:
+    candidates = []
+    seen = set()
+    topic = primary_topic or title
+
+    def add_candidate(
+        *,
+        reason: str,
+        search_query: str,
+        language: str | None = None,
+        source_type: str | None = None,
+        priority: str = "medium",
+    ):
+        clean_source_type = source_type if source_type in TARGET_SOURCE_TYPES else None
+        name_basis = language or clean_source_type or "Suggested"
+        name = intelligence_provider.clean_text(f"{name_basis} source for {topic}", limit=120, fallback="Suggested source")
+        key = f"{name}|{search_query}".lower()
+        if key in seen:
+            return
+        seen.add(key)
+        draft = {
+            "id": hashlib.sha1(key.encode("utf-8")).hexdigest()[:16],
+            "name": name,
+            "website_url": None,
+            "rss_url": None,
+            "feed_type": "manual",
+            "country": countries[0] if len(countries) == 1 else None,
+            "language": language,
+            "region": None,
+            "source_size": "medium",
+            "source_type": clean_source_type or "independent",
+            "credibility_notes": intelligence_provider.clean_text(
+                f"{reason} Suggested search query: {search_query}",
+                limit=500,
+            ),
+            "search_query": search_query,
+            "priority": priority,
+            "status": "draft",
+        }
+        draft["source_manager_url"] = _source_draft_url(draft)
+        candidates.append(draft)
+
+    for task in tasks:
+        query = task.get("search_query")
+        if not query:
+            continue
+        target_languages = task.get("target_languages") if isinstance(task.get("target_languages"), list) else []
+        target_source_types = task.get("target_source_types") if isinstance(task.get("target_source_types"), list) else []
+        add_candidate(
+            reason=task.get("reason") or "Close this coverage gap.",
+            search_query=query,
+            language=target_languages[0] if target_languages else None,
+            source_type=target_source_types[0] if target_source_types else None,
+            priority=task.get("priority") or "medium",
+        )
+
+    for search in searches:
+        query = search.get("query")
+        if not query:
+            continue
+        add_candidate(
+            reason=search.get("reason") or "Find a source candidate for this cluster.",
+            search_query=query,
+            language=search.get("language"),
+            source_type=search.get("source_type"),
+            priority="medium",
+        )
+
+    return candidates[:8]
+
+
 def _cluster_automation(
     *,
     title: str,
@@ -622,9 +716,17 @@ def _cluster_automation(
         ),
         3,
     )
+    source_candidates = _source_candidates_from_automation(
+        title=title,
+        primary_topic=primary_topic,
+        countries=countries,
+        tasks=tasks,
+        searches=deduped_searches,
+    )
     return {
         "coverage_gap_tasks": tasks,
         "suggested_source_searches": deduped_searches,
+        "source_candidates": source_candidates,
         "recommended_actions": [
             {
                 "type": task.get("type"),
@@ -632,6 +734,7 @@ def _cluster_automation(
                 "priority": task.get("priority"),
                 "reason": task.get("reason"),
                 "search_query": task.get("search_query"),
+                "source_manager_url": (source_candidates[0] or {}).get("source_manager_url") if source_candidates else None,
             }
             for task in tasks[:5]
         ],
@@ -944,6 +1047,7 @@ def _build_cluster_feed_cards(
         automation = provider_metadata.get("automation") or {}
         coverage_gap_tasks = automation.get("coverage_gap_tasks") or []
         suggested_source_searches = automation.get("suggested_source_searches") or []
+        source_candidates = automation.get("source_candidates") or []
         recommended_actions = automation.get("recommended_actions") or []
         href = f"/compare?articleId={base_article.get('id')}" if base_article.get("id") else "/compare"
         payload = {
@@ -968,6 +1072,7 @@ def _build_cluster_feed_cards(
             "automation": automation,
             "coverage_gap_tasks": coverage_gap_tasks,
             "suggested_source_searches": suggested_source_searches,
+            "source_candidates": source_candidates,
         }
         if article_count >= 2:
             cards.append(
@@ -1109,6 +1214,7 @@ def _build_cluster_feed_cards(
                         "what_changed": {
                             "task_count": len(coverage_gap_tasks),
                             "source_search_count": len(suggested_source_searches),
+                            "source_candidate_count": len(source_candidates),
                             "automation_score": automation.get("automation_score"),
                         },
                         "recommended_action": "Use the suggested searches to add or sync missing source perspectives.",
@@ -1393,6 +1499,7 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
         "automation": automation,
         "coverage_gap_tasks": automation.get("coverage_gap_tasks") or [],
         "suggested_source_searches": automation.get("suggested_source_searches") or [],
+        "source_candidates": automation.get("source_candidates") or [],
         "limitations": [
             "Event clustering is a retrieval signal, not a factual verdict.",
             "Cross-language matching is heuristic and can miss translations, synonyms, and local naming differences.",
@@ -1400,6 +1507,42 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
         ],
         "provider_metadata": intelligence_provider.provider_metadata(
             task="event_cluster_detail",
+            status="heuristic",
+        ),
+    }
+
+
+def build_event_cluster_source_drafts(cluster_id: str, limit: int = 8) -> dict:
+    cluster = get_event_cluster(cluster_id)
+    if not cluster:
+        raise FeedStoreError("Event cluster not found.")
+    metadata = cluster.get("provider_metadata") or {}
+    automation = metadata.get("automation") or {}
+    candidates = automation.get("source_candidates") or []
+    limit = max(1, min(int(limit or 8), 25))
+    return {
+        "cluster": {
+            "id": cluster.get("id"),
+            "title": cluster.get("title"),
+            "primary_topic": cluster.get("primary_topic"),
+            "article_count": cluster.get("article_count"),
+            "languages": cluster.get("languages") or [],
+            "countries": cluster.get("countries") or [],
+        },
+        "source_candidates": candidates[:limit],
+        "coverage_gap_tasks": (automation.get("coverage_gap_tasks") or [])[:limit],
+        "suggested_source_searches": (automation.get("suggested_source_searches") or [])[:limit],
+        "summary": {
+            "candidate_count": min(len(candidates), limit),
+            "task_count": len(automation.get("coverage_gap_tasks") or []),
+            "search_count": len(automation.get("suggested_source_searches") or []),
+        },
+        "limitations": [
+            "Source candidates are drafts generated from coverage gaps; review names, URLs, and credibility notes before creating a source.",
+            "Suggested searches are discovery prompts, not source endorsements.",
+        ],
+        "provider_metadata": intelligence_provider.provider_metadata(
+            task="event_cluster_source_drafts",
             status="heuristic",
         ),
     }

@@ -471,6 +471,7 @@ def _cluster_summary(cluster: dict | None) -> dict | None:
         "automation": metadata.get("automation") or {},
         "coverage_gap_tasks": (metadata.get("automation") or {}).get("coverage_gap_tasks") or [],
         "suggested_source_searches": (metadata.get("automation") or {}).get("suggested_source_searches") or [],
+        "source_candidates": (metadata.get("automation") or {}).get("source_candidates") or [],
         "limitations": [
             "The event cluster is a retrieval signal, not evidence that the articles agree.",
             "Cluster membership should be checked through claim, source, and timeline comparison.",

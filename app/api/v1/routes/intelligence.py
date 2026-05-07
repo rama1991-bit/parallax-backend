@@ -9,6 +9,7 @@ from app.services.intelligence_aggregation import (
 )
 from app.services.intelligence_pipeline import run_intelligence_pipeline
 from app.services.event_clustering import (
+    build_event_cluster_source_drafts,
     get_event_cluster_detail,
     list_event_cluster_summaries,
     list_recent_event_cluster_refresh_runs,
@@ -153,6 +154,20 @@ async def list_intelligence_clusters(
         )
     except FeedStoreError as exc:
         if str(exc) == "Topic not found.":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/clusters/{cluster_id}/source-drafts")
+async def get_intelligence_cluster_source_drafts(
+    cluster_id: str,
+    limit: int = Query(default=8, ge=1, le=25),
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return build_event_cluster_source_drafts(cluster_id, limit=limit)
+    except FeedStoreError as exc:
+        if str(exc) == "Event cluster not found.":
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
