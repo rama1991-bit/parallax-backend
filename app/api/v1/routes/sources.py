@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
@@ -34,6 +34,7 @@ from app.services.feed.store import (
 )
 from app.services.ops_notifications import deliver_source_ops_alerts
 from app.services.intelligence_aggregation import build_source_intelligence
+from app.services.event_clustering import build_event_cluster_source_drafts, resolve_event_cluster_source_draft
 from app.services.ingested_analysis import analyze_pending_ingested_articles
 from app.services.osint import OSINTContextError, build_article_osint_context
 from app.services.source_sync import sync_active_source_feeds, sync_source_feeds
@@ -54,6 +55,10 @@ class SourceCreate(BaseModel):
     credibility_notes: str | None = None
     notes: str | None = None
     feed_type: Literal["rss", "homepage", "manual"] | None = None
+    draft_cluster_id: str | None = None
+    draft_candidate_id: str | None = None
+    draft_payload: dict[str, Any] | None = None
+    draft_resolution_notes: str | None = None
 
 
 class SourceFeedCreate(BaseModel):
@@ -109,6 +114,11 @@ async def list_sources(
 @router.post("")
 async def create_source(payload: SourceCreate):
     try:
+        if payload.draft_cluster_id and payload.draft_candidate_id:
+            draft_context = build_event_cluster_source_drafts(payload.draft_cluster_id, limit=25)
+            if not any(item.get("id") == payload.draft_candidate_id for item in draft_context.get("source_candidates") or []):
+                raise FeedStoreError("Source draft not found.")
+
         source = create_source_record(
             name=payload.name,
             website_url=_url(payload.website_url),
@@ -146,8 +156,20 @@ async def create_source(payload: SourceCreate):
             )
 
         refreshed = get_source_record(source["id"]) or source
-        return {"source": refreshed, "feed": feed}
+        draft_resolution = None
+        if payload.draft_cluster_id and payload.draft_candidate_id:
+            draft_resolution = resolve_event_cluster_source_draft(
+                cluster_id=payload.draft_cluster_id,
+                candidate_id=payload.draft_candidate_id,
+                status="created",
+                source_id=refreshed["id"],
+                resolution_notes=payload.draft_resolution_notes or "Source created from source draft.",
+                draft_payload=payload.draft_payload,
+            )
+        return {"source": refreshed, "feed": feed, "draft_resolution": draft_resolution}
     except FeedStoreError as exc:
+        if str(exc) in {"Event cluster not found.", "Source draft not found.", "Source not found."}:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

@@ -1,6 +1,7 @@
 from uuid import uuid4
 from datetime import datetime, timezone
 import re
+from urllib.parse import urlencode
 
 from app.services.feed.store import (
     FeedStoreError,
@@ -8,6 +9,7 @@ from app.services.feed.store import (
     get_ingested_article_record,
     list_event_cluster_articles,
     list_ingested_article_records,
+    list_source_draft_resolutions,
     save_article_comparison_record,
 )
 from app.services.intelligence import enhance_compare_result, provider_metadata
@@ -447,6 +449,42 @@ def _cluster_summary(cluster: dict | None) -> dict | None:
     if not cluster:
         return None
     metadata = cluster.get("provider_metadata") if isinstance(cluster.get("provider_metadata"), dict) else {}
+    automation = metadata.get("automation") or {}
+    candidates = automation.get("source_candidates") or []
+    resolutions = list_source_draft_resolutions(cluster_id=cluster.get("id"), limit=250) if cluster.get("id") else []
+    resolution_by_candidate = {item.get("candidate_id"): item for item in resolutions if item.get("candidate_id")}
+    resolved_candidates = []
+    for candidate in candidates:
+        draft = {**candidate, "cluster_id": cluster.get("id"), "candidate_id": candidate.get("id")}
+        resolution = resolution_by_candidate.get(candidate.get("id"))
+        if resolution:
+            draft.update(
+                {
+                    "status": resolution.get("status") or candidate.get("status") or "draft",
+                    "source_id": resolution.get("source_id"),
+                    "resolved_at": resolution.get("resolved_at"),
+                    "resolution_notes": resolution.get("resolution_notes"),
+                    "resolution": resolution,
+                }
+            )
+        params = {
+            "cluster_id": draft.get("cluster_id"),
+            "candidate_id": draft.get("id") or draft.get("candidate_id"),
+            "draft_name": draft.get("name"),
+            "feed_type": draft.get("feed_type"),
+            "country": draft.get("country"),
+            "language": draft.get("language"),
+            "region": draft.get("region"),
+            "source_size": draft.get("source_size"),
+            "source_type": draft.get("source_type"),
+            "credibility_notes": draft.get("credibility_notes"),
+            "search_query": draft.get("search_query"),
+            "draft_status": draft.get("status"),
+            "source_id": draft.get("source_id"),
+        }
+        draft["source_manager_url"] = "/sources?" + urlencode({key: value for key, value in params.items() if value})
+        resolved_candidates.append(draft)
+    automation = {**automation, "source_candidates": resolved_candidates}
     return {
         "id": cluster.get("id"),
         "cluster_key": cluster.get("cluster_key"),
@@ -468,10 +506,11 @@ def _cluster_summary(cluster: dict | None) -> dict | None:
         "cluster_quality": metadata.get("cluster_quality") or {},
         "source_diversity": metadata.get("source_diversity") or {},
         "language_bridge_terms": metadata.get("language_bridge_terms") or [],
-        "automation": metadata.get("automation") or {},
-        "coverage_gap_tasks": (metadata.get("automation") or {}).get("coverage_gap_tasks") or [],
-        "suggested_source_searches": (metadata.get("automation") or {}).get("suggested_source_searches") or [],
-        "source_candidates": (metadata.get("automation") or {}).get("source_candidates") or [],
+        "automation": automation,
+        "coverage_gap_tasks": automation.get("coverage_gap_tasks") or [],
+        "suggested_source_searches": automation.get("suggested_source_searches") or [],
+        "source_candidates": resolved_candidates,
+        "source_draft_resolutions": resolutions,
         "limitations": [
             "The event cluster is a retrieval signal, not evidence that the articles agree.",
             "Cluster membership should be checked through claim, source, and timeline comparison.",

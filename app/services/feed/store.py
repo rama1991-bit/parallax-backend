@@ -43,6 +43,7 @@ INTELLIGENCE_REFRESH_RUNS = []
 EVENT_CLUSTERS = []
 EVENT_CLUSTER_ARTICLES = []
 EVENT_CLUSTER_REFRESH_RUNS = []
+SOURCE_DRAFT_RESOLUTIONS = []
 ARTICLE_COMPARISONS = []
 NODES = []
 NODE_EDGES = []
@@ -85,6 +86,7 @@ _SOURCE_FEED_STATUSES = {"active", "paused", "quarantined", "disabled"}
 _SOURCE_OPS_ALERT_SEVERITIES = {"info", "warning", "critical"}
 _SOURCE_OPS_ALERT_STATUSES = {"active", "acknowledged", "resolved"}
 _SOURCE_OPS_DELIVERY_STATUSES = {"delivered", "failed", "skipped"}
+_SOURCE_DRAFT_RESOLUTION_STATUSES = {"draft", "created", "resolved", "ignored"}
 
 
 def now_iso():
@@ -862,6 +864,24 @@ def _ensure_schema():
                     );
                     """,
                     """
+                    create table if not exists public.source_draft_resolutions (
+                        id uuid primary key,
+                        cluster_id uuid not null,
+                        candidate_id text not null,
+                        status text not null default 'draft' check (
+                            status in ('draft', 'created', 'resolved', 'ignored')
+                        ),
+                        source_id uuid references public.sources(id) on delete set null,
+                        resolution_notes text,
+                        draft_payload jsonb not null default '{}'::jsonb,
+                        created_source_payload jsonb not null default '{}'::jsonb,
+                        resolved_at timestamptz,
+                        created_at timestamptz not null default now(),
+                        updated_at timestamptz not null default now(),
+                        unique (cluster_id, candidate_id)
+                    );
+                    """,
+                    """
                     create index if not exists idx_event_clusters_latest
                     on public.event_clusters (latest_seen_at desc, article_count desc);
                     """,
@@ -884,6 +904,15 @@ def _ensure_schema():
                     """
                     create index if not exists idx_event_cluster_refresh_runs_session_started
                     on public.event_cluster_refresh_runs (session_id, started_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_draft_resolutions_cluster
+                    on public.source_draft_resolutions (cluster_id, status, updated_at desc);
+                    """,
+                    """
+                    create index if not exists idx_source_draft_resolutions_source
+                    on public.source_draft_resolutions (source_id, updated_at desc)
+                    where source_id is not null;
                     """,
                     """
                     create index if not exists idx_source_ops_alerts_status_severity
@@ -4056,6 +4085,157 @@ def get_event_cluster_for_article(article_id: str) -> dict | None:
         return {**cluster, "membership": membership} if cluster else None
     except psycopg2.Error as exc:
         raise FeedStoreError(f"Could not load event cluster for article: {exc}") from exc
+
+
+def _normalize_source_draft_resolution_status(status: str | None) -> str:
+    clean_status = _clean_text(status, 20) or "draft"
+    return clean_status if clean_status in _SOURCE_DRAFT_RESOLUTION_STATUSES else "draft"
+
+
+def _row_to_source_draft_resolution(row: dict) -> dict:
+    return {
+        "id": str(row.get("id")),
+        "cluster_id": str(row.get("cluster_id")) if row.get("cluster_id") else None,
+        "candidate_id": row.get("candidate_id"),
+        "status": row.get("status") or "draft",
+        "source_id": str(row.get("source_id")) if row.get("source_id") else None,
+        "resolution_notes": row.get("resolution_notes"),
+        "draft_payload": row.get("draft_payload") or {},
+        "created_source_payload": row.get("created_source_payload") or {},
+        "resolved_at": _row_optional_datetime(row, "resolved_at"),
+        "created_at": _row_created_at(row),
+        "updated_at": _row_optional_datetime(row, "updated_at") or _row_created_at(row),
+    }
+
+
+def save_source_draft_resolution(
+    *,
+    cluster_id: str,
+    candidate_id: str,
+    status: str = "draft",
+    source_id: str | None = None,
+    resolution_notes: str | None = None,
+    draft_payload: dict | None = None,
+    created_source_payload: dict | None = None,
+) -> dict:
+    clean_cluster_id = _clean_text(cluster_id, 80)
+    clean_candidate_id = _clean_text(candidate_id, 120)
+    clean_status = _normalize_source_draft_resolution_status(status)
+    clean_source_id = _clean_text(source_id, 80)
+    clean_notes = _clean_text(resolution_notes, 1000)
+    if not clean_cluster_id or not clean_candidate_id:
+        raise FeedStoreError("Cluster ID and candidate ID are required.")
+
+    resolved_at = now_iso() if clean_status in {"created", "resolved", "ignored"} else None
+    payload = {
+        "id": str(uuid4()),
+        "cluster_id": clean_cluster_id,
+        "candidate_id": clean_candidate_id,
+        "status": clean_status,
+        "source_id": clean_source_id,
+        "resolution_notes": clean_notes,
+        "draft_payload": draft_payload or {},
+        "created_source_payload": created_source_payload or {},
+        "resolved_at": resolved_at,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+
+    if not database_enabled():
+        existing = next(
+            (
+                item
+                for item in SOURCE_DRAFT_RESOLUTIONS
+                if item.get("cluster_id") == clean_cluster_id and item.get("candidate_id") == clean_candidate_id
+            ),
+            None,
+        )
+        if existing:
+            existing.update({key: value for key, value in payload.items() if key not in {"id", "created_at"}})
+            return dict(existing)
+        SOURCE_DRAFT_RESOLUTIONS.insert(0, payload)
+        return dict(payload)
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    insert into public.source_draft_resolutions (
+                        id, cluster_id, candidate_id, status, source_id,
+                        resolution_notes, draft_payload, created_source_payload,
+                        resolved_at, created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                    on conflict (cluster_id, candidate_id) do update set
+                        status = excluded.status,
+                        source_id = case
+                            when excluded.status = 'draft' and excluded.source_id is null then null
+                            else coalesce(excluded.source_id, public.source_draft_resolutions.source_id)
+                        end,
+                        resolution_notes = coalesce(excluded.resolution_notes, public.source_draft_resolutions.resolution_notes),
+                        draft_payload = case
+                            when excluded.draft_payload = '{}'::jsonb then public.source_draft_resolutions.draft_payload
+                            else excluded.draft_payload
+                        end,
+                        created_source_payload = case
+                            when excluded.status = 'draft' and excluded.created_source_payload = '{}'::jsonb then '{}'::jsonb
+                            when excluded.created_source_payload = '{}'::jsonb then public.source_draft_resolutions.created_source_payload
+                            else excluded.created_source_payload
+                        end,
+                        resolved_at = excluded.resolved_at,
+                        updated_at = now()
+                    returning *;
+                    """,
+                    (
+                        payload["id"],
+                        clean_cluster_id,
+                        clean_candidate_id,
+                        clean_status,
+                        clean_source_id,
+                        clean_notes,
+                        Json(draft_payload or {}),
+                        Json(created_source_payload or {}),
+                        resolved_at,
+                    ),
+                )
+                return _row_to_source_draft_resolution(cur.fetchone())
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not save source draft resolution: {exc}") from exc
+
+
+def list_source_draft_resolutions(cluster_id: str, limit: int = 100) -> list[dict]:
+    clean_cluster_id = _clean_text(cluster_id, 80)
+    limit = max(1, min(int(limit or 100), 250))
+    if not clean_cluster_id:
+        return []
+
+    if not database_enabled():
+        items = [
+            dict(item)
+            for item in SOURCE_DRAFT_RESOLUTIONS
+            if item.get("cluster_id") == clean_cluster_id
+        ]
+        return sorted(items, key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)[:limit]
+
+    _ensure_schema()
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    select *
+                    from public.source_draft_resolutions
+                    where cluster_id::text = %s
+                    order by updated_at desc
+                    limit %s;
+                    """,
+                    (clean_cluster_id, limit),
+                )
+                return [_row_to_source_draft_resolution(row) for row in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise FeedStoreError(f"Could not list source draft resolutions: {exc}") from exc
 
 
 def _row_to_event_cluster_refresh_run(row: dict) -> dict:

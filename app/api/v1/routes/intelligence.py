@@ -1,4 +1,7 @@
+from typing import Any, Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from app.core.admin import require_admin_key
 from app.core.session import get_session_id
@@ -14,9 +17,17 @@ from app.services.event_clustering import (
     list_event_cluster_summaries,
     list_recent_event_cluster_refresh_runs,
     refresh_event_clusters,
+    resolve_event_cluster_source_draft,
 )
 
 router = APIRouter()
+
+
+class SourceDraftResolutionUpdate(BaseModel):
+    status: Literal["draft", "created", "resolved", "ignored"]
+    source_id: str | None = None
+    resolution_notes: str | None = None
+    draft_payload: dict[str, Any] | None = None
 
 
 @router.post("/pipeline/run")
@@ -168,6 +179,28 @@ async def get_intelligence_cluster_source_drafts(
         return build_event_cluster_source_drafts(cluster_id, limit=limit)
     except FeedStoreError as exc:
         if str(exc) == "Event cluster not found.":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/clusters/{cluster_id}/source-drafts/{candidate_id}/resolve")
+async def resolve_intelligence_cluster_source_draft(
+    cluster_id: str,
+    candidate_id: str,
+    payload: SourceDraftResolutionUpdate,
+    _: None = Depends(require_admin_key),
+):
+    try:
+        return resolve_event_cluster_source_draft(
+            cluster_id=cluster_id,
+            candidate_id=candidate_id,
+            status=payload.status,
+            source_id=payload.source_id,
+            resolution_notes=payload.resolution_notes,
+            draft_payload=payload.draft_payload,
+        )
+    except FeedStoreError as exc:
+        if str(exc) in {"Event cluster not found.", "Source draft not found.", "Source not found."}:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

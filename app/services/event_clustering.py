@@ -18,10 +18,13 @@ from app.services.feed.store import (
     list_event_cluster_refresh_runs,
     list_event_clusters,
     list_ingested_article_records,
+    list_source_draft_resolutions,
     list_topics,
+    get_source_record,
     replace_event_clusters,
     save_event_cluster_refresh_run,
     save_generated_feed_cards,
+    save_source_draft_resolution,
 )
 
 
@@ -482,6 +485,8 @@ def _search_query(*parts: Any) -> str:
 
 def _source_draft_url(draft: dict) -> str:
     params = {
+        "cluster_id": draft.get("cluster_id"),
+        "candidate_id": draft.get("id") or draft.get("candidate_id"),
         "draft_name": draft.get("name"),
         "feed_type": draft.get("feed_type"),
         "country": draft.get("country"),
@@ -491,8 +496,51 @@ def _source_draft_url(draft: dict) -> str:
         "source_type": draft.get("source_type"),
         "credibility_notes": draft.get("credibility_notes"),
         "search_query": draft.get("search_query"),
+        "draft_status": draft.get("status"),
+        "source_id": draft.get("source_id"),
     }
     return "/sources?" + urlencode({key: value for key, value in params.items() if value})
+
+
+def _attach_source_draft_context(cluster_id: str, candidates: list[dict]) -> list[dict]:
+    contextualized = []
+    for candidate in candidates or []:
+        draft = {**candidate, "cluster_id": cluster_id, "candidate_id": candidate.get("id")}
+        draft["source_manager_url"] = _source_draft_url(draft)
+        contextualized.append(draft)
+    return contextualized
+
+
+def _source_draft_status_summary(candidates: list[dict], resolutions: list[dict]) -> dict:
+    status_counts = Counter(candidate.get("status") or "draft" for candidate in candidates)
+    return {
+        "draft_count": status_counts.get("draft", 0),
+        "created_count": status_counts.get("created", 0),
+        "resolved_count": status_counts.get("resolved", 0),
+        "ignored_count": status_counts.get("ignored", 0),
+        "resolution_count": len(resolutions),
+    }
+
+
+def _source_candidates_with_resolutions(cluster_id: str, candidates: list[dict]) -> tuple[list[dict], list[dict], dict]:
+    contextualized = _attach_source_draft_context(cluster_id, candidates)
+    resolutions = list_source_draft_resolutions(cluster_id=cluster_id, limit=250)
+    resolution_by_candidate = {item.get("candidate_id"): item for item in resolutions if item.get("candidate_id")}
+    resolved_candidates = []
+    for candidate in contextualized:
+        resolution = resolution_by_candidate.get(candidate.get("id"))
+        if resolution:
+            candidate = {
+                **candidate,
+                "status": resolution.get("status") or candidate.get("status") or "draft",
+                "source_id": resolution.get("source_id"),
+                "resolved_at": resolution.get("resolved_at"),
+                "resolution_notes": resolution.get("resolution_notes"),
+                "resolution": resolution,
+            }
+            candidate["source_manager_url"] = _source_draft_url(candidate)
+        resolved_candidates.append(candidate)
+    return resolved_candidates, resolutions, _source_draft_status_summary(resolved_candidates, resolutions)
 
 
 def _source_candidates_from_automation(
@@ -951,6 +999,12 @@ def _finalize_cluster(working: dict) -> tuple[dict, list[dict]]:
         frames=frame_values,
         matches=working.get("matches") or {},
     )
+    automation = provider_metadata.get("automation") or {}
+    automation["source_candidates"] = _attach_source_draft_context(
+        cluster_id,
+        automation.get("source_candidates") or [],
+    )
+    provider_metadata["automation"] = automation
     cluster = {
         "id": cluster_id,
         "cluster_key": cluster_key,
@@ -1472,6 +1526,11 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
         raise FeedStoreError("Event cluster not found.")
     metadata = cluster.get("provider_metadata") or {}
     automation = metadata.get("automation") or {}
+    source_candidates, source_draft_resolutions, source_draft_summary = _source_candidates_with_resolutions(
+        cluster_id,
+        automation.get("source_candidates") or [],
+    )
+    automation = {**automation, "source_candidates": source_candidates}
     memberships = list_event_cluster_articles(cluster_id, limit=100)
     articles = [
         {
@@ -1499,7 +1558,9 @@ def get_event_cluster_detail(cluster_id: str) -> dict:
         "automation": automation,
         "coverage_gap_tasks": automation.get("coverage_gap_tasks") or [],
         "suggested_source_searches": automation.get("suggested_source_searches") or [],
-        "source_candidates": automation.get("source_candidates") or [],
+        "source_candidates": source_candidates,
+        "source_draft_resolutions": source_draft_resolutions,
+        "source_draft_summary": source_draft_summary,
         "limitations": [
             "Event clustering is a retrieval signal, not a factual verdict.",
             "Cross-language matching is heuristic and can miss translations, synonyms, and local naming differences.",
@@ -1518,7 +1579,10 @@ def build_event_cluster_source_drafts(cluster_id: str, limit: int = 8) -> dict:
         raise FeedStoreError("Event cluster not found.")
     metadata = cluster.get("provider_metadata") or {}
     automation = metadata.get("automation") or {}
-    candidates = automation.get("source_candidates") or []
+    candidates, source_draft_resolutions, source_draft_summary = _source_candidates_with_resolutions(
+        cluster_id,
+        automation.get("source_candidates") or [],
+    )
     limit = max(1, min(int(limit or 8), 25))
     return {
         "cluster": {
@@ -1530,12 +1594,14 @@ def build_event_cluster_source_drafts(cluster_id: str, limit: int = 8) -> dict:
             "countries": cluster.get("countries") or [],
         },
         "source_candidates": candidates[:limit],
+        "source_draft_resolutions": source_draft_resolutions[:limit],
         "coverage_gap_tasks": (automation.get("coverage_gap_tasks") or [])[:limit],
         "suggested_source_searches": (automation.get("suggested_source_searches") or [])[:limit],
         "summary": {
             "candidate_count": min(len(candidates), limit),
             "task_count": len(automation.get("coverage_gap_tasks") or []),
             "search_count": len(automation.get("suggested_source_searches") or []),
+            **source_draft_summary,
         },
         "limitations": [
             "Source candidates are drafts generated from coverage gaps; review names, URLs, and credibility notes before creating a source.",
@@ -1543,6 +1609,70 @@ def build_event_cluster_source_drafts(cluster_id: str, limit: int = 8) -> dict:
         ],
         "provider_metadata": intelligence_provider.provider_metadata(
             task="event_cluster_source_drafts",
+            status="heuristic",
+        ),
+    }
+
+
+def resolve_event_cluster_source_draft(
+    *,
+    cluster_id: str,
+    candidate_id: str,
+    status: str,
+    source_id: str | None = None,
+    resolution_notes: str | None = None,
+    draft_payload: dict | None = None,
+) -> dict:
+    cluster = get_event_cluster(cluster_id)
+    if not cluster:
+        raise FeedStoreError("Event cluster not found.")
+    metadata = cluster.get("provider_metadata") or {}
+    automation = metadata.get("automation") or {}
+    candidates = _attach_source_draft_context(cluster_id, automation.get("source_candidates") or [])
+    candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+    if not candidate:
+        raise FeedStoreError("Source draft not found.")
+
+    source = None
+    if source_id:
+        source = get_source_record(source_id)
+        if not source:
+            raise FeedStoreError("Source not found.")
+    if status == "created" and not source:
+        raise FeedStoreError("Created source draft resolutions require a source_id.")
+
+    resolution = save_source_draft_resolution(
+        cluster_id=cluster_id,
+        candidate_id=candidate_id,
+        status=status,
+        source_id=(source or {}).get("id"),
+        resolution_notes=resolution_notes,
+        draft_payload=draft_payload or candidate,
+        created_source_payload=source or {},
+    )
+    source_candidates, source_draft_resolutions, source_draft_summary = _source_candidates_with_resolutions(
+        cluster_id,
+        candidates,
+    )
+    resolved_candidate = next((item for item in source_candidates if item.get("id") == candidate_id), candidate)
+    return {
+        "cluster": {
+            "id": cluster.get("id"),
+            "title": cluster.get("title"),
+            "primary_topic": cluster.get("primary_topic"),
+        },
+        "source_candidate": resolved_candidate,
+        "resolution": resolution,
+        "source": source,
+        "source_candidates": source_candidates,
+        "source_draft_resolutions": source_draft_resolutions,
+        "summary": source_draft_summary,
+        "limitations": [
+            "Resolution status records workflow state only; it does not validate the added source's editorial reliability.",
+            "A resolved or ignored draft can be reopened by saving it with draft status.",
+        ],
+        "provider_metadata": intelligence_provider.provider_metadata(
+            task="event_cluster_source_draft_resolution",
             status="heuristic",
         ),
     }

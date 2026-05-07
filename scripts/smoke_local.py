@@ -55,6 +55,7 @@ def _reset_memory_store() -> None:
         store.EVENT_CLUSTERS,
         store.EVENT_CLUSTER_ARTICLES,
         store.EVENT_CLUSTER_REFRESH_RUNS,
+        store.SOURCE_DRAFT_RESOLUTIONS,
         store.ARTICLE_COMPARISONS,
         store.NODES,
         store.NODE_EDGES,
@@ -731,6 +732,45 @@ def main() -> int:
     ).json()
     assert source_drafts["source_candidates"], source_drafts
     assert source_drafts["source_candidates"][0]["source_manager_url"].startswith("/sources?"), source_drafts
+    draft_candidate = source_drafts["source_candidates"][0]
+    assert "cluster_id=" in draft_candidate["source_manager_url"], draft_candidate
+    assert "candidate_id=" in draft_candidate["source_manager_url"], draft_candidate
+    denied_draft_resolution = client.post(
+        f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
+        json={"status": "ignored", "resolution_notes": "public request should fail"},
+        headers=headers,
+    )
+    assert denied_draft_resolution.status_code == 403, denied_draft_resolution.text
+    ignored_draft = _assert_ok(
+        client.post(
+            f"/api/v1/intelligence/clusters/{clusters['items'][0]['id']}/source-drafts/{draft_candidate['id']}/resolve",
+            json={"status": "ignored", "resolution_notes": "No reliable source found yet."},
+            headers=admin_headers,
+        ),
+        "intelligence/cluster-source-draft-ignore",
+    ).json()
+    assert ignored_draft["source_candidate"]["status"] == "ignored", ignored_draft
+    drafted_source_payload = _assert_ok(
+        client.post(
+            "/api/v1/sources",
+            json={
+                "name": f"{draft_candidate['name']} fixture",
+                "country": draft_candidate.get("country"),
+                "language": draft_candidate.get("language"),
+                "source_size": draft_candidate.get("source_size"),
+                "source_type": draft_candidate.get("source_type"),
+                "credibility_notes": draft_candidate.get("credibility_notes"),
+                "feed_type": "manual",
+                "draft_cluster_id": clusters["items"][0]["id"],
+                "draft_candidate_id": draft_candidate["id"],
+                "draft_payload": draft_candidate,
+            },
+            headers=admin_headers,
+        ),
+        "sources/create-from-cluster-draft",
+    ).json()
+    assert drafted_source_payload["draft_resolution"]["source_candidate"]["status"] == "created", drafted_source_payload
+    assert drafted_source_payload["draft_resolution"]["resolution"]["source_id"] == drafted_source_payload["source"]["id"], drafted_source_payload
     clustered_compare = _assert_ok(
         client.get(f"/api/v1/compare/{ingested_article_id}?limit=5", headers=headers),
         "compare/ingested-article-clustered",
@@ -738,6 +778,11 @@ def main() -> int:
     assert clustered_compare["event_cluster"]["id"], clustered_compare
     assert clustered_compare["event_cluster"]["cluster_quality"]["quality_score"] > 0, clustered_compare
     assert clustered_compare["event_cluster"]["coverage_gap_tasks"], clustered_compare
+    assert any(
+        item.get("status") == "created"
+        for item in clustered_compare["event_cluster"]["source_candidates"]
+        if item.get("id") == draft_candidate["id"]
+    ), clustered_compare["event_cluster"]["source_candidates"]
     cluster_feed = _assert_ok(
         client.get("/api/v1/feed?filter_type=narrative&limit=30", headers=headers),
         "feed/event-cluster-cards",
